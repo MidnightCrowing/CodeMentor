@@ -1,0 +1,30 @@
+# =============================
+# LLM 模型配置文件
+# ⚠️ 请在此填写你需要使用的模型 ID
+# =============================
+
+llm:
+  # 主对话模型（用于流式回答学生问题）
+  chat_model: "gpt-4o-mini"   # ⚠️ 请替换为你的主模型 ID
+
+  # 轻量分类模型（用于前置判断 is_programming）
+  classify_model: "gpt-4o-mini"  # ⚠️ 可以用更小的模型以节省成本
+
+  # 离线分析模型（用于每日学习行为分析，不需要最强模型）
+  analysis_model: "gpt-4o-mini"  # ⚠️ 请替换为你的分析模型 ID
+
+  # API 调用超时（秒），建议 30
+  timeout: 30
+
+  # API Base URL（如使用 OpenAI 官方接口保持默认，使用代理或 Azure 时修改）
+  base_url: "https://api.openai.com/v1"   # ⚠️ 如使用代理请修改此地址
+
+app:
+  # FastAPI 启动端口
+  port: 8000
+  # 每次分析压缩的对话块大小（超过此数量时分段压缩）
+  compression_chunk_size: 20
+  # 教师端报告最多取最近多少天的 daily_analysis
+  max_report_days: 30
+  # 凌晨几点运行离线分析任务（24 小时制，默认 3）
+  daily_analysis_hour: 3
