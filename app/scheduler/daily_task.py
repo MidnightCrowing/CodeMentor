@@ -22,9 +22,12 @@ from datetime import date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import delete, text
+from datetime import timezone, timedelta
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.models.models import Question
 from app.services import analysis_service
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,27 @@ async def _daily_analysis_job() -> None:
     async with AsyncSessionLocal() as db:
         try:
             result = await analysis_service.run_daily_analysis(db=db, date_str=today)
+            
+            # 附带执行过期数据物理清理
+            if settings.delete_history_days > 0:
+                from app.models.models import _now_utc
+                cutoff_date = _now_utc() - timedelta(days=settings.delete_history_days)
+                stmt = delete(Question).where(Question.created_at < cutoff_date)
+                res = await db.execute(stmt)
+                logger.info(f"[定时任务] 物理清理过期内容：抹除了 {res.rowcount} 条旧于 {settings.delete_history_days} 天的对话记录")
+
+            # 容量阈值探针
+            if settings.db_cleanup_size_gb > 0:
+                try:
+                    size_res = await db.execute(text("SELECT pg_database_size(current_database()) / 1024.0 / 1024.0 / 1024.0"))
+                    db_size_gb = size_res.scalar()
+                    if db_size_gb and db_size_gb > settings.db_cleanup_size_gb:
+                        logger.warning(
+                            f"[定时任务警报] 当前数据库物理空间占用 {db_size_gb:.2f}GB，已超过红线设定的 {settings.db_cleanup_size_gb}GB 容量！"
+                        )
+                except Exception as ex:
+                    logger.debug(f"[定时任务] 容量探测失败 {ex}")
+
             await db.commit()
             logger.info(
                 f"[定时任务] 每日分析完成：处理 {result['processed_users']} 人，"

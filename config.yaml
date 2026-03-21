@@ -8,10 +8,10 @@ llm:
       name: "GPT-5-Mini"
       support_thinking: false
     - id: "Pro/MiniMaxAI/MiniMax-M2.5"
-      name: "MiniMax-M2.5 (Pro)"
+      name: "MiniMax-M2.5"
       support_thinking: false
     - id: "Pro/zai-org/GLM-5"
-      name: "GLM-5 (Pro)"
+      name: "GLM-5"
       support_thinking: true
     - id: "Pro/moonshotai/Kimi-K2.5"
       name: "Kimi-K2.5"
@@ -20,7 +20,7 @@ llm:
       name: "DeepSeek-V3.2"
       support_thinking: true
     - id: "Pro/deepseek-ai/DeepSeek-V3.2"
-      name: "DeepSeek-V3.2 (Pro)"
+      name: "DeepSeek-V3.2"
       support_thinking: true
     - id: "Qwen/Qwen3.5-397B-A17B"
       name: "Qwen3.5-397B-A17B"
@@ -44,6 +44,8 @@ llm:
 app:
   # FastAPI 启动端口
   port: 8000
+  # 聊天防刷接口限流配置（默认 1 分钟 15 次，基于 IP 封锁）
+  rate_limit_chat: "15/minute"
   # 发给大模型的上下文条目限制（包含一问一答，取前N条提问）
   context_message_limit: 10
   # 每次分析压缩的对话块大小（超过此数量时分段压缩）
@@ -52,6 +54,10 @@ app:
   max_report_days: 30
   # 凌晨几点运行离线分析任务（24 小时制）
   daily_analysis_hour: 3
+  # 删除多少天之前的聊天历史记录（0表示永不删除）
+  delete_history_days: 30
+  # 数据库存储最大容量软阈值监控（预留预警或缩容机制依据，单位 GB）
+  db_cleanup_size_gb: 80
 
 logging:
   # 日志根目录

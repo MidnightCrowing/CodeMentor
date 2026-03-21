@@ -36,6 +36,62 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# User 表
+class User(Base):
+    """
+    用户鉴权管理表。
+    """
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="student", server_default="student")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc
+    )
+
+
+# 大模型同步底表
+class LlmModel(Base):
+    """
+    保存 config 配置文件中所有可选模型的信息。
+    主程序启动时将比对自动更新以保证数据的唯一入口同步。
+    """
+    __tablename__ = "llm_models"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    support_thinking: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+# 模型每日用量统计表
+class ModelUsageStat(Base):
+    """
+    按日（date）、用户（user_id）、模型（model_id）维度的大模型使用用量统计表。
+    包含调用次数、Token总和、接口总耗时与中断/报错总和。
+    """
+    __tablename__ = "model_usage_stats"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    date: Mapped[str] = mapped_column(String(10), nullable=False)  # "YYYY-MM-DD"
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("date", "user_id", "model_id", name="uq_usage_stat_dim"),
+        Index("idx_usage_stat", "user_id", "date"),
+    )
+
+
 # Session 表
 class Session(Base):
     """
@@ -71,18 +127,20 @@ class Question(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[str] = mapped_column(String, nullable=False)
-    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     is_programming: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now_utc
     )
 
     __table_args__ = (
         Index("idx_user_id", "user_id"),
+        Index("idx_session_id", "session_id"),
         Index("idx_created_at", "created_at"),
     )
 

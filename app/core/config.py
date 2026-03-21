@@ -60,10 +60,13 @@ class Settings(BaseSettings):
 
     # 应用配置（来自 yaml）
     port: int = _yaml["app"]["port"]
+    rate_limit_chat: str = _yaml["app"].get("rate_limit_chat", "15/minute")
     context_message_limit: int = _yaml["app"]["context_message_limit"]
     compression_chunk_size: int = _yaml["app"]["compression_chunk_size"]
     max_report_days: int = _yaml["app"]["max_report_days"]
     daily_analysis_hour: int = _yaml["app"]["daily_analysis_hour"]
+    delete_history_days: int = _yaml["app"].get("delete_history_days", 30)
+    db_cleanup_size_gb: int = _yaml["app"].get("db_cleanup_size_gb", 80)
     log_dir: str = _yaml.get("logging", {}).get("log_dir", "./logs")
 
 
