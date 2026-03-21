@@ -1,6 +1,6 @@
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from app.core.config import settings
@@ -14,19 +14,21 @@ def setup_logging():
         "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
     )
 
-    # 1. 错误日志 (error.log)
-    error_handler = RotatingFileHandler(
-        log_dir / "error.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    # 1. 错误日志 (error.log) 每天午夜切割，保留30天
+    error_handler = TimedRotatingFileHandler(
+        log_dir / "error.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
     )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(fmt)
+    error_handler.suffix = "%Y-%m-%d.log"
 
-    # 2. 应用日志 (app.log)
-    app_handler = RotatingFileHandler(
-        log_dir / "app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    # 2. 应用日志 (app.log) 每天午夜切割，保留30天
+    app_handler = TimedRotatingFileHandler(
+        log_dir / "app.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
     )
     app_handler.setLevel(logging.INFO)
     app_handler.setFormatter(fmt)
+    app_handler.suffix = "%Y-%m-%d.log"
 
     # 3. 控制台输出 (方便开发调试)
     console_handler = logging.StreamHandler(sys.stdout)
@@ -46,11 +48,12 @@ def setup_logging():
     root_logger.addHandler(console_handler)
 
     # 4. 访问日志 (access.log) - 为 uvicorn.access 提供独立文件
-    access_handler = RotatingFileHandler(
-        log_dir / "access.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    access_handler = TimedRotatingFileHandler(
+        log_dir / "access.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
     )
     access_handler.setLevel(logging.INFO)
     access_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+    access_handler.suffix = "%Y-%m-%d.log"
     
     uvicorn_access_logger = logging.getLogger("uvicorn.access")
     if uvicorn_access_logger.hasHandlers():
@@ -64,4 +67,5 @@ def setup_logging():
     sqlalchemy_logger.addHandler(error_handler)
     sqlalchemy_logger.addHandler(app_handler)
 
-    logging.getLogger(__name__).info("日志系统初始化完成。")
+    logging.getLogger(__name__).info("日志系统启动：采用每日定点切割保留30天策略。")
+
