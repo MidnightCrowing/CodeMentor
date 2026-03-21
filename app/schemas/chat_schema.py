@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
     """流式对话接口请求体。"""
     user_id: str = Field(..., description="用户唯一标识")
     session_id: str | None = Field(None, description="会话 ID，用于多轮上下文，为空则由后端新创建")
+    dialog_id: uuid.UUID | None = Field(None, description="历史节点ID。若有值，其后的本会话旧记录将打上软删标记供重修此问")
     message: str = Field(..., min_length=1, max_length=8000, description="学生的提问内容")
     model_id: str | None = Field(None, description="指定对话模型 ID，不传则使用默认")
     enable_thinking: bool = Field(True, description="是否开启深度思考")
@@ -41,3 +42,9 @@ class SessionOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SessionRenameRequest(BaseModel):
+    """修改会话标题请求体。"""
+    user_id: str = Field(..., description="操作所属用户 ID，防止越权")
+    title: str = Field(..., min_length=1, max_length=100, description="新的会话标题, 长度限制1-100字符")

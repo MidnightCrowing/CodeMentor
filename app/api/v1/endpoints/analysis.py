@@ -13,7 +13,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, check_user_permission
 from app.schemas.analysis_schema import DailyAnalysisOut, ReportOut, ReportRequest
 from app.schemas.base import BaseResponse
 from app.services import analysis_service
@@ -40,6 +40,7 @@ async def get_daily_analysis(
 
     必须传入 start_date 和 end_date，防止全表扫描。
     """
+    await check_user_permission(user_id, db, "teacher")
     rows = await analysis_service.get_daily_analyses(
         db=db,
         user_id=user_id,
@@ -60,6 +61,7 @@ async def generate_report(
 
     从该用户最近 30 天的每日分析中汇总，调用 LLM 生成多维度评估报告。
     """
+    await check_user_permission(body.user_id, db, "teacher")
     try:
         report_text = await analysis_service.generate_report(db=db, user_id=body.user_id)
         return BaseResponse.ok(ReportOut(report=report_text))

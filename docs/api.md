@@ -33,9 +33,28 @@
 ### 1. 聊天对话 (Streaming)
 - **POST** `/chat`
 - **参数**:
+  - `user_id` (str, 必选): 用户唯一标识。
+  - `session_id` (str, 可选): 会话 ID。首次创建新会话不传即可，服务端将在流最后返回新的 ID。
   - `message` (str, 必选): 用户输入的内容。
   - `model_id` (str, 可选): 指定对话模型 ID。如果不传，则使用系统默认模型。
   - `enable_thinking` (bool, 可选，默认为 true): 是否开启模型的深度思考功能。
+
+### 2. 获取会话列表
+- **GET** `/sessions`
+- **参数**:
+  - `user_id` (str, 必选): 查询目标的用户 ID。
+  - `limit` (int, 可选): 每页返回条数，默认返回 20 条。
+  - `offset` (int, 可选): 分页偏移量，默认 0。
+- **返回数据 (`data` 结构)**:
+  - 数组类型，每个元素包含 `id`, `title`, `created_at` 等信息。
+
+### 2.5 删除会话记录
+- **DELETE** `/sessions/{session_id}`
+- **参数**:
+  - `session_id` (str, 路径参数): 要被移除的会话标识。
+  - `user_id` (str, 必填 Query): 用户标示，避免越权。
+- **返回数据 (`data` 结构)**:
+  - 字符串 `提示操作成功` 即可。
 
 ### 2. 获取可用模型列表
 - **GET** `/chat/models`
@@ -49,10 +68,11 @@
 - **GET** `/chat/questions`
 - **参数**:
   - `user_id` (str, 必选): 查询目标的用户 ID。
-  - `limit` (int, 可选): 每页返回条数，默认返回 20 条。
+  - `session_id` (str, 必选): 查询目标的会话 ID。
+  - `limit` (int, 可选): 每页返回条数，默认返回 50 条。
   - `offset` (int, 可选): 分页偏移量，默认 0。
 - **返回数据 (`data` 结构)**:
-  - 包含多个问答对象数据的数组列表。
+  - 包含指定会话下多个问答对象数据的数组列表（自动屏蔽 `is_deleted` 被废弃重修的问题，按时间正序排列从上至下）。
 
 ### 4. 获取每日分析结果
 - **GET** `/analysis/daily`
