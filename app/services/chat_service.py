@@ -29,14 +29,14 @@ from app.services import llm_service
 from app.services.llm_service import LLMServiceError
 
 
-# ── 固定拒答提示 ─────────────────────────────────────────────
+# 固定拒答提示
 NON_PROGRAMMING_ANSWER = (
     "抱歉，我是专门解答编程和技术问题的助教，无法回答非编程类的问题。"
     "请提问与代码、算法或软件开发相关的内容 😊"
 )
 
 
-# ── SSE 格式化工具 ────────────────────────────────────────────
+# SSE 格式化工具
 def _sse(type_: str, **kwargs) -> str:
     """
     格式化单条 SSE 消息。
@@ -53,7 +53,7 @@ def _sse(type_: str, **kwargs) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-# ── 核心流式生成器 ────────────────────────────────────────────
+# 核心流式生成器
 async def chat_stream_generator(
     user_id: str,
     session_id: str,
@@ -78,14 +78,14 @@ async def chat_stream_generator(
     Raises 不会向外传播异常，所有错误均以 SSE error 事件返回。
     """
 
-    # ── Step 1: 前置分类 ───────────────────────────────────────
+    # Step 1: 前置分类
     try:
         is_programming = await llm_service.classify(message)
     except LLMServiceError as e:
         yield _sse("error", message=str(e))
         return
 
-    # ── Step 2: 非编程问题 → 直接返回固定拒答 ──────────────────
+    # Step 2: 非编程问题 → 直接返回固定拒答
     if not is_programming:
         yield _sse("content", data=NON_PROGRAMMING_ANSWER)
         yield _sse("done")
@@ -102,7 +102,7 @@ async def chat_stream_generator(
         )
         return
 
-    # ── Step 3: 编程问题 → 流式回答 ────────────────────────────
+    # Step 3: 编程问题 → 流式回答
     full_answer_parts: list[str] = []
     usage_info: dict | None = None
 
@@ -123,7 +123,7 @@ async def chat_stream_generator(
         if not full_answer_parts:
             return
 
-    # ── Step 4: 写入数据库 ──────────────────────────────────────
+    # Step 4: 写入数据库
     full_answer = "".join(full_answer_parts)
     await _save_question(
         db=db,
@@ -137,7 +137,7 @@ async def chat_stream_generator(
     )
 
 
-# ── 数据库写入（私有）───────────────────────────────────────
+# 数据库写入（私有）
 async def _save_question(
     db: AsyncSession,
     user_id: str,

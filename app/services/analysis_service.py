@@ -31,7 +31,7 @@ from app.services import llm_service
 from app.services.llm_service import LLMServiceError
 
 
-# ── 私有：问答数据格式化 ──────────────────────────────────────
+# 私有：问答数据格式化
 def _format_questions(questions: list[Question]) -> str:
     """
     将 Question 对象列表格式化为 LLM 可理解的文本段落。
@@ -50,7 +50,7 @@ def _format_questions(questions: list[Question]) -> str:
     return "\n\n".join(lines)
 
 
-# ── 私有：分块压缩 ────────────────────────────────────────────
+# 私有：分块压缩
 def _chunk_questions(questions: list[Question], chunk_size: int) -> list[list[Question]]:
     """
     将问答列表按 chunk_size 切分。
@@ -65,7 +65,7 @@ def _chunk_questions(questions: list[Question], chunk_size: int) -> list[list[Qu
     return [questions[i:i + chunk_size] for i in range(0, len(questions), chunk_size)]
 
 
-# ── 每日分析主函数（由定时器调用）────────────────────────────
+# 每日分析主函数（由定时器调用）
 async def run_daily_analysis(db: AsyncSession, date_str: str) -> dict:
     """
     对所有用户执行指定日期的每日学习分析。
@@ -177,7 +177,7 @@ async def _analyze_and_upsert(
     await db.flush()
 
 
-# ── 教师端：查询每日分析列表 ─────────────────────────────────
+# 教师端：查询每日分析列表
 async def get_daily_analyses(
     db: AsyncSession,
     user_id: str,
@@ -211,7 +211,7 @@ async def get_daily_analyses(
     return list(result.scalars().all())
 
 
-# ── 教师端：生成完整报告 ──────────────────────────────────────
+# 教师端：生成完整报告
 async def generate_report(db: AsyncSession, user_id: str) -> str:
     """
     汇总最近 max_report_days（默认30天）的每日分析，生成完整学习报告。

@@ -19,20 +19,23 @@ LLM 服务封装层（核心模块）。
 """
 
 import json
+import logging
 from collections.abc import AsyncGenerator
 
 from openai import AsyncOpenAI, APITimeoutError, APIError
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 
-# ── 自定义异常 ───────────────────────────────────────────────
+
+# 自定义异常
 class LLMServiceError(Exception):
     """LLM 调用失败时抛出，携带可读的错误信息。"""
     pass
 
 
-# ── 客户端单例 ────────────────────────────────────────────────
+# 客户端单例
 # 模块级单例，避免每次请求重复创建连接
 _client = AsyncOpenAI(
     api_key=settings.openai_api_key,
@@ -41,7 +44,7 @@ _client = AsyncOpenAI(
 )
 
 
-# ── 工具函数 ─────────────────────────────────────────────────
+# 工具函数
 def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
     """
     构建标准 OpenAI messages 数组。
@@ -59,7 +62,7 @@ def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
     ]
 
 
-# ── 前置分类 ─────────────────────────────────────────────────
+# 前置分类
 _CLASSIFY_SYSTEM_PROMPT = """
 你是一个严格的问题分类器。
 判断用户的问题是否属于编程/技术类问题。
@@ -102,13 +105,15 @@ async def classify(message: str) -> bool:
         result = json.loads(raw)
         return bool(result.get("is_programming", False))
 
-    except APITimeoutError:
-        raise LLMServiceError("分类模型调用超时，请稍后重试")
+    except APITimeoutError as e:
+        logger.error(f"模型调用超时: {e}", exc_info=True)
+        raise LLMServiceError("模型调用超时，请稍后重试")
     except (APIError, json.JSONDecodeError) as e:
-        raise LLMServiceError(f"分类模型调用失败：{e}")
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
 
-# ── 流式对话 ─────────────────────────────────────────────────
+# 流式对话
 _CHAT_SYSTEM_PROMPT = """
 你是一位专业的编程助教，专门帮助学生解答代码相关问题。
 请用简洁、准确的语言回答，并在适当时给出代码示例。
@@ -168,13 +173,15 @@ async def chat_stream(
         # 最后 yield 结束信号（携带 usage）
         yield "", usage_info
 
-    except APITimeoutError:
-        raise LLMServiceError("主模型调用超时（超过 30 秒）")
+    except APITimeoutError as e:
+        logger.error(f"模型调用超时: {e}", exc_info=True)
+        raise LLMServiceError("模型调用超时")
     except APIError as e:
-        raise LLMServiceError(f"主模型调用失败：{e}")
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
 
-# ── 离线分析（严格 JSON 输出）───────────────────────────────
+# 离线分析（严格 JSON 输出）
 _ANALYSIS_SYSTEM_PROMPT = """
 你是一个学习行为分析系统。
 根据提供的学生问答记录，生成结构化的学习分析结果。
@@ -239,10 +246,12 @@ async def analyze(questions_text: str) -> dict:
             "total_tokens": response.usage.total_tokens if response.usage else 0,
         }
 
-    except APITimeoutError:
-        raise LLMServiceError("分析模型调用超时（超过 30 秒）")
+    except APITimeoutError as e:
+        logger.error(f"模型调用超时: {e}", exc_info=True)
+        raise LLMServiceError("模型调用超时")
     except (APIError, json.JSONDecodeError) as e:
-        raise LLMServiceError(f"分析模型调用失败：{e}")
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
 
 async def summarize_report(daily_summaries: str) -> str:
@@ -271,7 +280,9 @@ async def summarize_report(daily_summaries: str) -> str:
         )
         return response.choices[0].message.content or ""
 
-    except APITimeoutError:
-        raise LLMServiceError("报告生成超时（超过 30 秒）")
+    except APITimeoutError as e:
+        logger.error(f"模型调用超时: {e}", exc_info=True)
+        raise LLMServiceError("模型调用超时")
     except APIError as e:
-        raise LLMServiceError(f"报告生成失败：{e}")
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("模型调用失败：服务异常或配置错误")

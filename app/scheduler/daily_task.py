@@ -29,7 +29,7 @@ from app.services import analysis_service
 
 logger = logging.getLogger(__name__)
 
-# ── 调度器单例 ────────────────────────────────────────────────
+# 调度器单例
 _scheduler = AsyncIOScheduler()
 
 
