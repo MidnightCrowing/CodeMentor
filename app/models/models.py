@@ -46,6 +46,7 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(200), nullable=True, default="新会话")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now_utc
     )

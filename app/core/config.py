@@ -53,12 +53,14 @@ class Settings(BaseSettings):
     chat_model: str = _yaml["llm"]["chat_model"]
     available_models: list[dict] = _yaml["llm"].get("available_models", [])
     classify_model: str = _yaml["llm"]["classify_model"]
+    title_model: str = _yaml["llm"]["title_model"]
     analysis_model: str = _yaml["llm"]["analysis_model"]
     llm_timeout: int = _yaml["llm"]["timeout"]
     llm_base_url: str = _yaml["llm"]["base_url"]
 
     # 应用配置（来自 yaml）
     port: int = _yaml["app"]["port"]
+    context_message_limit: int = _yaml["app"]["context_message_limit"]
     compression_chunk_size: int = _yaml["app"]["compression_chunk_size"]
     max_report_days: int = _yaml["app"]["max_report_days"]
     daily_analysis_hour: int = _yaml["app"]["daily_analysis_hour"]
