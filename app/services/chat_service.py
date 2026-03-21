@@ -59,6 +59,7 @@ async def chat_stream_generator(
     session_id: str,
     message: str,
     enable_thinking: bool,
+    model_id: str | None,
     db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """
@@ -109,7 +110,11 @@ async def chat_stream_generator(
     usage_info: dict | None = None
 
     try:
-        async for chunk_type, chunk_data, usage in llm_service.chat_stream(message, enable_thinking=enable_thinking):
+        async for chunk_type, chunk_data, usage in llm_service.chat_stream(
+            message, 
+            enable_thinking=enable_thinking,
+            model_id=model_id,
+        ):
             if chunk_type == "content" and chunk_data:
                 full_answer_parts.append(chunk_data)
                 yield _sse("content", data=chunk_data)

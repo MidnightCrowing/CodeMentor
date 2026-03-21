@@ -10,7 +10,7 @@ api/v1/endpoints/analysis.py
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
@@ -64,6 +64,6 @@ async def generate_report(
         report_text = await analysis_service.generate_report(db=db, user_id=body.user_id)
         return BaseResponse.ok(ReportOut(report=report_text))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        return BaseResponse.error(str(e))
     except LLMServiceError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        return BaseResponse.error(str(e))

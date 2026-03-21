@@ -16,6 +16,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.schemas.base import BaseResponse
 
 from app.api.v1.router import router as v1_router
 from app.scheduler.daily_task import start_scheduler, stop_scheduler
@@ -77,6 +80,16 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """拦截 FastAPI 中抛出的 HTTPException，转换为统一错误格式。"""
+    logger.warning(f"HTTP 异常: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": 1, "message": str(exc.detail), "data": None},
+    )
+
+
 # 挂载路由
 app.include_router(v1_router)
 
@@ -85,4 +98,4 @@ app.include_router(v1_router)
 @app.get("/health", tags=["系统"])
 async def health_check():
     """服务心跳检测接口。"""
-    return {"status": "ok"}
+    return BaseResponse.ok({"status": "ok"})

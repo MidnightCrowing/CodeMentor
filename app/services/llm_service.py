@@ -125,6 +125,7 @@ async def chat_stream(
     message: str,
     history: list[dict] | None = None,
     enable_thinking: bool = True,
+    model_id: str | None = None,
 ) -> AsyncGenerator[tuple[str, str, dict | None], None]:
     """
     主对话：流式生成 AI 回答（支持深度思考阶段）。
@@ -151,8 +152,9 @@ async def chat_stream(
     messages.append({"role": "user", "content": message})
 
     try:
+        target_model = model_id if model_id else settings.chat_model
         req_kwargs = {
-            "model": settings.chat_model,
+            "model": target_model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -167,7 +169,7 @@ async def chat_stream(
             # 末尾 chunk 携带 usage 信息
             if chunk.usage:
                 usage_info = {
-                    "model": settings.chat_model,
+                    "model": target_model,
                     "total_tokens": chunk.usage.total_tokens,
                 }
 
