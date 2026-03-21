@@ -58,6 +58,7 @@ async def chat_stream_generator(
     user_id: str,
     session_id: str,
     message: str,
+    enable_thinking: bool,
     db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """
@@ -104,14 +105,18 @@ async def chat_stream_generator(
 
     # Step 3: 编程问题 → 流式回答
     full_answer_parts: list[str] = []
+    reasoning_parts: list[str] = []
     usage_info: dict | None = None
 
     try:
-        async for content_chunk, usage in llm_service.chat_stream(message):
-            if content_chunk:
-                full_answer_parts.append(content_chunk)
-                yield _sse("content", data=content_chunk)
-            elif usage:
+        async for chunk_type, chunk_data, usage in llm_service.chat_stream(message, enable_thinking=enable_thinking):
+            if chunk_type == "content" and chunk_data:
+                full_answer_parts.append(chunk_data)
+                yield _sse("content", data=chunk_data)
+            elif chunk_type == "reasoning" and chunk_data:
+                reasoning_parts.append(chunk_data)
+                yield _sse("reasoning", data=chunk_data)
+            elif chunk_type == "done" and usage:
                 # 最后一块，携带 usage 信息
                 usage_info = usage
 
@@ -120,11 +125,17 @@ async def chat_stream_generator(
     except LLMServiceError as e:
         yield _sse("error", message=str(e))
         # 流中断，仍尝试保存已收到的部分（如有）
-        if not full_answer_parts:
+        if not full_answer_parts and not reasoning_parts:
             return
 
     # Step 4: 写入数据库
-    full_answer = "".join(full_answer_parts)
+    answer_text = "".join(full_answer_parts)
+    if reasoning_parts:
+        reasoning_text = "".join(reasoning_parts)
+        full_answer = f"<think>\n{reasoning_text}\n</think>\n\n{answer_text}"
+    else:
+        full_answer = answer_text
+
     await _save_question(
         db=db,
         user_id=user_id,

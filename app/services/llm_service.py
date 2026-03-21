@@ -124,21 +124,23 @@ _CHAT_SYSTEM_PROMPT = """
 async def chat_stream(
     message: str,
     history: list[dict] | None = None,
-) -> AsyncGenerator[tuple[str, dict | None], None]:
+    enable_thinking: bool = True,
+) -> AsyncGenerator[tuple[str, str, dict | None], None]:
     """
-    主对话：流式生成 AI 回答。
+    主对话：流式生成 AI 回答（支持深度思考阶段）。
 
     通过 AsyncGenerator 逐块 yield 内容片段。
-    最后一块 yield (content="", usage=usage_dict)，携带 token 使用统计。
 
     Args:
         message: 学生当前提问
         history: 可选的历史对话列表，格式 [{"role": "user/assistant", "content": "..."}]
 
     Yields:
-        (content_chunk: str, usage: dict | None)
-        - 正常内容块：(非空字符串, None)
-        - 结束信号：("", {"model": str, "total_tokens": int})
+        (chunk_type: str, chunk_data: str, usage: dict | None)
+        - chunk_type 可能是 "content" 或 "reasoning" 或 "done"
+        - 正常内容块："content", "文本内容", None
+        - 思考内容块："reasoning", "思考内容", None
+        - 结束信号："done", "", {"model": str, "total_tokens": int}
 
     Raises:
         LLMServiceError: 调用失败或超时
@@ -149,12 +151,15 @@ async def chat_stream(
     messages.append({"role": "user", "content": message})
 
     try:
-        stream = await _client.chat.completions.create(
-            model=settings.chat_model,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},  # 流式时请求 usage 信息
-        )
+        req_kwargs = {
+            "model": settings.chat_model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "extra_body": {"enable_thinking": enable_thinking} if enable_thinking is not None else {}
+        }
+        
+        stream = await _client.chat.completions.create(**req_kwargs)
 
         usage_info: dict | None = None
 
@@ -167,11 +172,22 @@ async def chat_stream(
                 }
 
             delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
-                yield delta.content, None
+            if delta:
+                content = delta.content
+                # 兼容不同提供商的 reasoning_content 取值
+                if enable_thinking:
+                    reasoning_content = getattr(delta, "reasoning_content", None)
+                    if not reasoning_content and hasattr(delta, "model_extra") and delta.model_extra:
+                        reasoning_content = delta.model_extra.get("reasoning_content")
+
+                    if reasoning_content:
+                        yield "reasoning", reasoning_content, None
+                
+                if content:
+                    yield "content", content, None
 
         # 最后 yield 结束信号（携带 usage）
-        yield "", usage_info
+        yield "done", "", usage_info
 
     except APITimeoutError as e:
         logger.error(f"模型调用超时: {e}", exc_info=True)

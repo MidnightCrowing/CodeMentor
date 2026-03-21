@@ -37,6 +37,7 @@ async def chat(
         user_id=body.user_id,
         session_id=body.session_id,
         message=body.message,
+        enable_thinking=body.enable_thinking,
         db=db,
     )
     return StreamingResponse(generator, media_type="text/event-stream")
