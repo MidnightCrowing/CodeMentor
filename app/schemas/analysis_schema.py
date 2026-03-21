@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-# ── 固化的分析 JSON 结构 ──────────────────────────────────────
+# 固化的分析 JSON 结构
 # ⚠️ 不允许随意修改此结构！修改后需同步 LLM Prompt 中的要求。
 class AnalysisJson(BaseModel):
     """
@@ -32,7 +32,7 @@ class AnalysisJson(BaseModel):
     topic: str = Field(default="unknown", description="今日主要编程主题")
 
 
-# ── 每日分析查询响应体 ────────────────────────────────────────
+# 每日分析查询响应体
 class DailyAnalysisOut(BaseModel):
     """GET /api/v1/analysis/daily 的单条响应结构。"""
     id: uuid.UUID
@@ -45,13 +45,13 @@ class DailyAnalysisOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── 完整报告触发请求体 ────────────────────────────────────────
+# 完整报告触发请求体
 class ReportRequest(BaseModel):
     """POST /api/v1/analysis/report 请求体。"""
     user_id: str = Field(..., description="目标用户 ID")
 
 
-# ── 完整报告响应体 ────────────────────────────────────────────
+# 完整报告响应体
 class ReportOut(BaseModel):
     """POST /api/v1/analysis/report 响应结构。"""
     report: str = Field(description="完整学习报告文本（LLM 汇总生成）")

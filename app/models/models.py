@@ -36,7 +36,7 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ── Session 表 ───────────────────────────────────────────────
+# Session 表
 class Session(Base):
     """
     会话管理表（可选）。
@@ -51,7 +51,7 @@ class Session(Base):
     )
 
 
-# ── Question 表 ──────────────────────────────────────────────
+# Question 表
 class Question(Base):
     """
     问答记录表。
@@ -86,7 +86,7 @@ class Question(Base):
     )
 
 
-# ── DailyAnalysis 表 ─────────────────────────────────────────
+# DailyAnalysis 表
 class DailyAnalysis(Base):
     """
     每日学习分析结果表。

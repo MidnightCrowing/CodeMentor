@@ -24,7 +24,7 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
 
-# ── 异步引擎 ─────────────────────────────────────────────────
+# 异步引擎
 # pool_pre_ping 在每次使用前检活连接（避免连接超时断开导致错误）
 engine = create_async_engine(
     settings.database_url,
@@ -32,7 +32,7 @@ engine = create_async_engine(
     echo=False,  # 调试时可改为 True 打印 SQL
 )
 
-# ── 会话工厂 ─────────────────────────────────────────────────
+# 会话工厂
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -40,13 +40,13 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-# ── ORM 基类 ─────────────────────────────────────────────────
+# ORM 基类
 class Base(DeclarativeBase):
     """所有 SQLAlchemy ORM Model 必须继承此类。"""
     pass
 
 
-# ── FastAPI 依赖注入生成器 ────────────────────────────────────
+# FastAPI 依赖注入生成器
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     FastAPI 路由依赖。用法：
