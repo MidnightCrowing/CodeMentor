@@ -29,6 +29,9 @@ llm:
   # 轻量分类模型（用于前置判断 is_programming）
   classify_model: "gpt-5-mini"
 
+  # 用于生成会话标题的模型
+  title_model: "gpt-5-mini"
+
   # 离线分析模型（用于每日学习行为分析）
   analysis_model: "gpt-5-mini"
 
@@ -41,6 +44,8 @@ llm:
 app:
   # FastAPI 启动端口
   port: 8000
+  # 发给大模型的上下文条目限制（包含一问一答，取前N条提问）
+  context_message_limit: 10
   # 每次分析压缩的对话块大小（超过此数量时分段压缩）
   compression_chunk_size: 20
   # 教师端报告最多取最近多少天的 daily_analysis

@@ -25,6 +25,13 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI, APITimeoutError, APIError
 
 from app.core.config import settings
+from app.core.prompts import (
+    ANALYSIS_SYSTEM_PROMPT,
+    CHAT_SYSTEM_PROMPT,
+    CLASSIFY_SYSTEM_PROMPT,
+    SUMMARIZE_REPORT_PROMPT,
+    TITLE_SYSTEM_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +70,6 @@ def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
 
 
 # 前置分类
-_CLASSIFY_SYSTEM_PROMPT = """
-你是一个严格的问题分类器。
-判断用户的问题是否属于编程/技术类问题。
-
-你只能以如下 JSON 格式回复，不允许有任何其他内容：
-{"is_programming": true}
-或
-{"is_programming": false}
-
-"编程/技术类问题"定义：
-- 涉及代码、算法、数据结构、框架、工具、调试等
-- NOT 编程：问天气、问历史、问日常生活等
-""".strip()
 
 
 async def classify(message: str) -> bool:
@@ -97,7 +91,7 @@ async def classify(message: str) -> bool:
     try:
         response = await _client.chat.completions.create(
             model=settings.classify_model,
-            messages=_build_messages(_CLASSIFY_SYSTEM_PROMPT, message),
+            messages=_build_messages(CLASSIFY_SYSTEM_PROMPT, message),
             response_format={"type": "json_object"},
             temperature=0,  # 分类任务不需要随机性
         )
@@ -113,12 +107,33 @@ async def classify(message: str) -> bool:
         raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
 
+# 标题生成
+
+async def generate_session_title(message: str) -> str:
+    """
+    根据给定的首句消息，生成简短的会话标题。
+    
+    使用 title_model，超时返回默认标题或空串（不抛错影响主流程）。
+
+    Args:
+        message (str): 用户的原始提问文本
+    Returns:
+        str: 提炼的简短标题。发生错误则返回 "新会话"。
+    """
+    try:
+        response = await _client.chat.completions.create(
+            model=settings.title_model,
+            messages=_build_messages(TITLE_SYSTEM_PROMPT, message),
+            temperature=0.7,
+        )
+        title_text = response.choices[0].message.content or "新会话"
+        return title_text.strip(' \n"\'。')[:10]
+    except Exception as e:
+        logger.warning(f"生成标题失败: {e}")
+        return "新会话"
+
+
 # 流式对话
-_CHAT_SYSTEM_PROMPT = """
-你是一位专业的编程助教，专门帮助学生解答代码相关问题。
-请用简洁、准确的语言回答，并在适当时给出代码示例。
-只回答编程和技术相关的问题。
-""".strip()
 
 
 async def chat_stream(
@@ -146,7 +161,7 @@ async def chat_stream(
     Raises:
         LLMServiceError: 调用失败或超时
     """
-    messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": message})
@@ -200,30 +215,6 @@ async def chat_stream(
 
 
 # 离线分析（严格 JSON 输出）
-_ANALYSIS_SYSTEM_PROMPT = """
-你是一个学习行为分析系统。
-根据提供的学生问答记录，生成结构化的学习分析结果。
-
-你必须以如下 JSON 格式输出，不允许有任何其他内容：
-{
-  "analysis_text": "对学生今日学习表现的自然语言总结（2-4句）",
-  "analysis_json": {
-    "initiative": "high 或 medium 或 low",
-    "depth": "high 或 medium 或 low",
-    "topic": "今日主要讨论的编程主题（简短关键词）"
-  }
-}
-
-initiative（主动性）判断标准：
-- high: 问题多样、主动追问
-- medium: 正常提问频率
-- low: 问题极少或过于简单
-
-depth（深度）判断标准：
-- high: 涉及原理、有追问、举一反三
-- medium: 正常提问
-- low: 仅问表面、没有追问
-""".strip()
 
 
 async def analyze(questions_text: str) -> dict:
@@ -250,7 +241,7 @@ async def analyze(questions_text: str) -> dict:
     try:
         response = await _client.chat.completions.create(
             model=settings.analysis_model,
-            messages=_build_messages(_ANALYSIS_SYSTEM_PROMPT, questions_text),
+            messages=_build_messages(ANALYSIS_SYSTEM_PROMPT, questions_text),
             response_format={"type": "json_object"},
             temperature=0.3,
         )
@@ -285,15 +276,10 @@ async def summarize_report(daily_summaries: str) -> str:
     Raises:
         LLMServiceError: 调用失败或超时
     """
-    system = (
-        "你是一名教育数据分析师，请根据以下多天的学生学习分析日志，"
-        "生成一份完整、客观的学习能力评估报告。"
-        "报告应包括：整体表现、进步趋势、薄弱点与建议，约 300-500 字。"
-    )
     try:
         response = await _client.chat.completions.create(
             model=settings.analysis_model,
-            messages=_build_messages(system, daily_summaries),
+            messages=_build_messages(SUMMARIZE_REPORT_PROMPT, daily_summaries),
             temperature=0.5,
         )
         return response.choices[0].message.content or ""

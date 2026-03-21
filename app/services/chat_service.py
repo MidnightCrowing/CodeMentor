@@ -19,13 +19,19 @@ SSE 消息格式（与前端约定）：
 测试入口：tests/test_chat_service.py
 """
 
+import asyncio
 import json
+import uuid
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Question
+from app.core.config import settings
+from app.models.models import Question, Session
 from app.services import llm_service
+from app.utils.text_utils import remove_think_tags
+
 from app.services.llm_service import LLMServiceError
 
 
@@ -56,7 +62,7 @@ def _sse(type_: str, **kwargs) -> str:
 # 核心流式生成器
 async def chat_stream_generator(
     user_id: str,
-    session_id: str,
+    session_id: str | None,
     message: str,
     enable_thinking: bool,
     model_id: str | None,
@@ -95,7 +101,7 @@ async def chat_stream_generator(
         await _save_question(
             db=db,
             user_id=user_id,
-            session_id=session_id,
+            session_id=target_session_id if 'target_session_id' in locals() else session_id,
             question=message,
             answer=NON_PROGRAMMING_ANSWER,
             is_programming=False,
@@ -104,17 +110,71 @@ async def chat_stream_generator(
         )
         return
 
+    # Step 2.5: 会话和历史记录处理
+    # ======================================================
+    target_session_id = session_id
+    history = []
+    title_task = None
+
+    if not target_session_id:
+        # 新建会话
+        target_session_id = str(uuid.uuid4())
+        new_session = Session(id=target_session_id, user_id=user_id)
+        db.add(new_session)
+        await db.flush()
+        # 后台生成标题
+        title_task = asyncio.create_task(llm_service.generate_session_title(message))
+    else:
+        # 校验会话
+        stmt_session = select(Session).where(Session.id == target_session_id)
+        result_sess = await db.execute(stmt_session)
+        existing_session = result_sess.scalars().first()
+        if not existing_session:
+            yield _sse("error", message=f"会话不存在或已失效: {target_session_id}")
+            return
+
+        # 加载历史
+        stmt_history = (
+            select(Question)
+            .where(Question.session_id == target_session_id)
+            .order_by(Question.created_at.desc())
+            .limit(settings.context_message_limit)
+        )
+        result_hist = await db.execute(stmt_history)
+        questions = result_hist.scalars().all()
+        # 按时间顺序（旧 -> 新）组装
+        for q in reversed(questions):
+            history.append({"role": "user", "content": q.question})
+            history.append({"role": "assistant", "content": remove_think_tags(q.answer)})
+
+    # ======================================================
     # Step 3: 编程问题 → 流式回答
     full_answer_parts: list[str] = []
     reasoning_parts: list[str] = []
     usage_info: dict | None = None
 
     try:
+        session_title = None
+        title_sent = False
+
         async for chunk_type, chunk_data, usage in llm_service.chat_stream(
-            message, 
+            message,
+            history=history,
             enable_thinking=enable_thinking,
             model_id=model_id,
         ):
+            # 【新增逻辑】：一旦标题生成完成，立即在这发一条独立的 SSE，提前抛出
+            if title_task and not title_sent and title_task.done():
+                session_title = title_task.result()
+                stmt_update = select(Session).where(Session.id == target_session_id)
+                res_upd = await db.execute(stmt_update)
+                db_sess = res_upd.scalars().first()
+                if db_sess:
+                    db_sess.title = session_title
+                    await db.flush()
+                yield _sse("session_meta", session_id=target_session_id, title=session_title)
+                title_sent = True
+
             if chunk_type == "content" and chunk_data:
                 full_answer_parts.append(chunk_data)
                 yield _sse("content", data=chunk_data)
@@ -125,6 +185,19 @@ async def chat_stream_generator(
                 # 最后一块，携带 usage 信息
                 usage_info = usage
 
+        # 【兜底】：如果聊天非常简短，循环结束前标题任务仍未出结果，此处等它执行完并发出
+        if title_task and not title_sent:
+            session_title = await title_task
+            stmt_update = select(Session).where(Session.id == target_session_id)
+            res_upd = await db.execute(stmt_update)
+            db_sess = res_upd.scalars().first()
+            if db_sess:
+                db_sess.title = session_title
+                await db.flush()
+            yield _sse("session_meta", session_id=target_session_id, title=session_title)
+            title_sent = True
+
+        # done 里面为了稳妥也可以带上，或者你前端可以全部用 session_meta 处理
         yield _sse("done")
 
     except LLMServiceError as e:
@@ -144,7 +217,7 @@ async def chat_stream_generator(
     await _save_question(
         db=db,
         user_id=user_id,
-        session_id=session_id,
+        session_id=target_session_id,
         question=message,
         answer=full_answer,
         is_programming=True,
