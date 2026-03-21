@@ -17,6 +17,7 @@ class ChatRequest(BaseModel):
     user_id: str = Field(..., description="用户唯一标识")
     session_id: str = Field(..., description="会话 ID，用于多轮上下文")
     message: str = Field(..., min_length=1, max_length=8000, description="学生的提问内容")
+    enable_thinking: bool = Field(True, description="是否开启深度思考")
 
 
 class QuestionOut(BaseModel):
