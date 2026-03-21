@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # LLM 配置（来自 yaml）
     chat_model: str = _yaml["llm"]["chat_model"]
+    available_models: list[dict] = _yaml["llm"].get("available_models", [])
     classify_model: str = _yaml["llm"]["classify_model"]
     analysis_model: str = _yaml["llm"]["analysis_model"]
     llm_timeout: int = _yaml["llm"]["timeout"]
