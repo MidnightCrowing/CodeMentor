@@ -173,3 +173,34 @@ class DailyAnalysis(Base):
         UniqueConstraint("user_id", "date", name="uq_user_date"),
         Index("idx_user_date", "user_id", "date"),
     )
+
+
+# Batch 分析任务表
+class AnalysisBatchJob(Base):
+    """
+    记录批量推理任务状态，用于离线分析结果回写。
+    """
+    __tablename__ = "analysis_batch_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    date: Mapped[str] = mapped_column(String(10), nullable=False)  # "YYYY-MM-DD"
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="created")
+
+    batch_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    input_file_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    output_file_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_file_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+    )
+
+    __table_args__ = (
+        Index("idx_batch_date", "date"),
+        Index("idx_batch_status", "status"),
+    )

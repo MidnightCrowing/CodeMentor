@@ -46,7 +46,13 @@ async def _daily_analysis_job() -> None:
 
     async with AsyncSessionLocal() as db:
         try:
-            result = await analysis_service.run_daily_analysis(db=db, date_str=today)
+            if settings.batch_api_key:
+                result = await analysis_service.submit_daily_analysis_batch(db=db, date_str=today)
+                logger.info(
+                    f"[定时任务] 已提交批量分析任务：{today}，提交 {result.get('submitted', 0)} 条请求"
+                )
+            else:
+                result = await analysis_service.run_daily_analysis(db=db, date_str=today)
             
             # 附带执行过期数据物理清理
             if settings.delete_history_days > 0:
@@ -69,13 +75,38 @@ async def _daily_analysis_job() -> None:
                     logger.debug(f"[定时任务] 容量探测失败 {ex}")
 
             await db.commit()
-            logger.info(
-                f"[定时任务] 每日分析完成：处理 {result['processed_users']} 人，"
-                f"跳过 {result['skipped']} 人"
-            )
+            if settings.batch_api_key:
+                logger.info("[定时任务] 每日分析批量任务提交完成")
+            else:
+                logger.info(
+                    f"[定时任务] 每日分析完成：处理 {result['processed_users']} 人，"
+                    f"跳过 {result['skipped']} 人"
+                )
         except Exception as e:
             await db.rollback()
             logger.error(f"[定时任务] 每日分析失败：{e}", exc_info=True)
+
+
+async def _batch_poll_job() -> None:
+    """
+    轮询 batch 任务状态并在完成时回写日报。
+    """
+    if not settings.batch_api_key:
+        return
+
+    async with AsyncSessionLocal() as db:
+        try:
+            jobs = await analysis_service.list_pending_batch_jobs(db=db)
+            if not jobs:
+                return
+
+            for job in jobs:
+                await analysis_service.process_batch_job(db=db, job=job)
+
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"[定时任务] Batch 轮询失败：{e}", exc_info=True)
 
 
 def start_scheduler() -> None:
@@ -90,6 +121,14 @@ def start_scheduler() -> None:
         id="daily_analysis",
         replace_existing=True,  # 防止重复注册
         misfire_grace_time=3600,  # 如果错过触发时间，1 小时内补运行
+    )
+    _scheduler.add_job(
+        _batch_poll_job,
+        trigger="interval",
+        minutes=settings.batch_poll_minutes,
+        id="batch_poll",
+        replace_existing=True,
+        misfire_grace_time=300,
     )
     _scheduler.start()
     logger.info(f"[定时任务] APScheduler 已启动，每日 {hour:02d}:00 执行分析")

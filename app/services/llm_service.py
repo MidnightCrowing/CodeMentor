@@ -45,7 +45,13 @@ class LLMServiceError(Exception):
 # 客户端单例
 # 模块级单例，避免每次请求重复创建连接
 _client = AsyncOpenAI(
-    api_key=settings.openai_api_key,
+    api_key=settings.chat_api_key,
+    base_url=settings.llm_base_url,
+    timeout=settings.llm_timeout,
+)
+
+_classify_client = AsyncOpenAI(
+    api_key=settings.classify_api_key or settings.chat_api_key,
     base_url=settings.llm_base_url,
     timeout=settings.llm_timeout,
 )
@@ -89,7 +95,7 @@ async def classify(message: str) -> bool:
         LLMServiceError: 调用失败或返回非法 JSON
     """
     try:
-        response = await _client.chat.completions.create(
+        response = await _classify_client.chat.completions.create(
             model=settings.classify_model,
             messages=_build_messages(CLASSIFY_SYSTEM_PROMPT, message),
             response_format={"type": "json_object"},
