@@ -4,7 +4,7 @@ core/config.py
 配置加载模块。
 
 职责：
-- 从环境变量（.env）读取敏感配置（如 OPENAI_API_KEY、DATABASE_URL）
+- 从环境变量（.env）读取敏感配置（如 CHAT_API_KEY、DATABASE_URL）
 - 从 config.yaml 读取应用级非敏感配置（如模型 ID、超时时长）
 - 提供全局单例 `settings` 对象供全项目使用
 
@@ -45,8 +45,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
     # 敏感配置（来自 .env）
-    # ⚠️ 必须在 .env 中设置 OPENAI_API_KEY
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
+    # ⚠️ 必须在 .env 中设置 CHAT_API_KEY
+    chat_api_key: str = Field(..., env="CHAT_API_KEY")
+    classify_api_key: str | None = Field(None, env="CLASSIFY_API_KEY")
+    batch_api_key: str | None = Field(None, env="BATCH_API_KEY")
     database_url: str = Field(..., env="DATABASE_URL")
 
     # LLM 配置（来自 yaml）
@@ -57,6 +59,7 @@ class Settings(BaseSettings):
     analysis_model: str = _yaml["llm"]["analysis_model"]
     llm_timeout: int = _yaml["llm"]["timeout"]
     llm_base_url: str = _yaml["llm"]["base_url"]
+    batch_completion_window: str = _yaml["llm"].get("batch_completion_window", "24h")
 
     # 应用配置（来自 yaml）
     port: int = _yaml["app"]["port"]
@@ -68,6 +71,7 @@ class Settings(BaseSettings):
     delete_history_days: int = _yaml["app"].get("delete_history_days", 30)
     db_cleanup_size_gb: int = _yaml["app"].get("db_cleanup_size_gb", 80)
     log_dir: str = _yaml.get("logging", {}).get("log_dir", "./logs")
+    batch_poll_minutes: int = _yaml["app"].get("batch_poll_minutes", 15)
 
 
 # 全局单例，项目各处 import 此对象使用

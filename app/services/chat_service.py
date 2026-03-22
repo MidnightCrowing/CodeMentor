@@ -22,7 +22,7 @@ from app.services.llm_service import LLMServiceError
 # 固定拒答提示
 NON_PROGRAMMING_ANSWER = (
     "抱歉，我是专门解答编程和技术问题的助教，无法回答非编程类的问题。"
-    "请提问与代码、算法或软件开发相关的内容 😊"
+    "请提问与代码、算法或软件开发相关的内容"
 )
 
 
@@ -259,6 +259,42 @@ async def chat_stream_generator(
             latency_ms=chat_latency_ms,
             is_error=True,
         )
+
+    except asyncio.CancelledError:
+        # 客户端（前端）主动断开连接 / 点击了停止生成
+        # 我们依然需要把已经生成的半截内容落库，并记录 Token 消耗
+        answer_text = "".join(full_answer_parts)
+        if reasoning_parts:
+            reasoning_text = "".join(reasoning_parts)
+            full_answer = f"<think>\n{reasoning_text}\n</think>\n\n{answer_text}"
+        else:
+            full_answer = answer_text
+            
+        await _save_question(
+            db=db,
+            user_id=user_id,
+            session_id=target_session_id,
+            question=message,
+            answer=full_answer + "\n\n[回答被用户中断]",
+            is_programming=True,
+            model=usage_info.get("model") if usage_info else None,
+            tokens=usage_info.get("total_tokens") if usage_info else None,
+        )
+        
+        chat_latency_ms = int((time.perf_counter() - chat_start_time) * 1000)
+        actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
+        await _upsert_model_usage(
+            db=db,
+            user_id=user_id,
+            model_id=actual_model,
+            prompt_tokens=usage_info.get("prompt_tokens", 0) if usage_info else 0,
+            completion_tokens=usage_info.get("completion_tokens", 0) if usage_info else 0,
+            total_tokens=usage_info.get("total_tokens", 0) if usage_info else 0,
+            latency_ms=chat_latency_ms,
+            is_error=False,
+        )
+        raise  # 必须重新抛出 CancelledError 遵守 asyncio 的底线规范
+
 
 
 async def _upsert_model_usage(

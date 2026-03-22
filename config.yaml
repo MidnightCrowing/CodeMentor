@@ -16,11 +16,11 @@ llm:
     - id: "Pro/moonshotai/Kimi-K2.5"
       name: "Kimi-K2.5"
       support_thinking: false
-    - id: "deepseek-ai/DeepSeek-V3.2"
-      name: "DeepSeek-V3.2"
+    - id: "deepseek-v3.2"
+      name: "DeepSeek-V3.2 Free"
       support_thinking: true
     - id: "Pro/deepseek-ai/DeepSeek-V3.2"
-      name: "DeepSeek-V3.2"
+      name: "DeepSeek-V3.2 Pro"
       support_thinking: true
     - id: "Qwen/Qwen3.5-397B-A17B"
       name: "Qwen3.5-397B-A17B"
@@ -41,6 +41,9 @@ llm:
   # API Base URL
   base_url: "https://api.chatanywhere.tech/v1"
 
+  # Batch 推理完成窗口（如 24h / 48h）
+  batch_completion_window: "24h"
+
 app:
   # FastAPI 启动端口
   port: 8000
@@ -58,6 +61,8 @@ app:
   delete_history_days: 30
   # 数据库存储最大容量软阈值监控（预留预警或缩容机制依据，单位 GB）
   db_cleanup_size_gb: 80
+  # Batch 任务轮询间隔（分钟）
+  batch_poll_minutes: 15
 
 logging:
   # 日志根目录

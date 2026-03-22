@@ -14,22 +14,21 @@ from slowapi.util import get_remote_address
 import typing
 
 def get_user_id_or_ip(request: Request) -> str:
-    """提取 user_id 作为限流条件，如果没有则退化为 IP"""
-    # 1. 尝试从 Query 获取
-    user_id = request.query_params.get("user_id")
-    if user_id:
-        return user_id
-        
-    # 2. 尝试从已经被 FastAPI 解析并缓存的 JSON body 获取
-    if hasattr(request, "_json"):
-        try:
-            body = request._json
-            if isinstance(body, dict) and "user_id" in body:
-                return body.get("user_id")
-        except Exception:
-            pass
-            
-    # 3. 兜底为 IP 限流
+    """提取用户身份作为限流条件，如果没有则退化为 IP"""
+    auth = request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        if token:
+            return token
+
+    x_user_id = request.headers.get("X-User-Id")
+    if x_user_id:
+        return x_user_id
+
+    cookie_user_id = request.cookies.get("user_id")
+    if cookie_user_id:
+        return cookie_user_id
+
     return get_remote_address(request)
 
 # 创建 Limiter 实例并以用户 ID（或 IP）作为哈希唯一标识来记录频次
