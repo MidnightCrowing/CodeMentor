@@ -20,6 +20,7 @@ LLM 服务封装层（核心模块）。
 
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from openai import AsyncOpenAI, APITimeoutError, APIError
@@ -34,6 +35,7 @@ from app.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+ai_logger = logging.getLogger("ai")
 
 
 # 自定义异常
@@ -75,6 +77,24 @@ def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
     ]
 
 
+def _log_ai_call(
+    action: str,
+    model: str,
+    elapsed_ms: int,
+    ok: bool,
+    extra: dict | None = None,
+) -> None:
+    payload = {
+        "action": action,
+        "model": model,
+        "elapsed_ms": elapsed_ms,
+        "ok": ok,
+    }
+    if extra:
+        payload.update(extra)
+    ai_logger.info(f"AI_CALL {payload}")
+
+
 # 前置分类
 
 
@@ -94,6 +114,7 @@ async def classify(message: str) -> bool:
     Raises:
         LLMServiceError: 调用失败或返回非法 JSON
     """
+    start = time.perf_counter()
     try:
         response = await _classify_client.chat.completions.create(
             model=settings.classify_model,
@@ -103,12 +124,32 @@ async def classify(message: str) -> bool:
         )
         raw = response.choices[0].message.content or "{}"
         result = json.loads(raw)
+        _log_ai_call(
+            action="classify",
+            model=settings.classify_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=True,
+        )
         return bool(result.get("is_programming", False))
 
     except APITimeoutError as e:
+        _log_ai_call(
+            action="classify",
+            model=settings.classify_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "timeout"},
+        )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时，请稍后重试")
     except (APIError, json.JSONDecodeError) as e:
+        _log_ai_call(
+            action="classify",
+            model=settings.classify_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "api_or_json"},
+        )
         logger.error(f"模型调用失败: {e}", exc_info=True)
         raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
@@ -126,6 +167,7 @@ async def generate_session_title(message: str) -> str:
     Returns:
         str: 提炼的简短标题。发生错误则返回 "新会话"。
     """
+    start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
             model=settings.title_model,
@@ -133,8 +175,21 @@ async def generate_session_title(message: str) -> str:
             temperature=0.7,
         )
         title_text = response.choices[0].message.content or "新会话"
+        _log_ai_call(
+            action="title",
+            model=settings.title_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=True,
+        )
         return title_text.strip(' \n"\'。')[:10]
     except Exception as e:
+        _log_ai_call(
+            action="title",
+            model=settings.title_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "exception"},
+        )
         logger.warning(f"生成标题失败: {e}")
         return "新会话"
 
@@ -172,6 +227,7 @@ async def chat_stream(
         messages.extend(history)
     messages.append({"role": "user", "content": message})
 
+    start = time.perf_counter()
     try:
         target_model = model_id if model_id else settings.chat_model
         req_kwargs = {
@@ -192,6 +248,8 @@ async def chat_stream(
                 usage_info = {
                     "model": target_model,
                     "total_tokens": chunk.usage.total_tokens,
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
                 }
 
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -210,12 +268,35 @@ async def chat_stream(
                     yield "content", content, None
 
         # 最后 yield 结束信号（携带 usage）
+        _log_ai_call(
+            action="chat_stream",
+            model=target_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=True,
+            extra={
+                "total_tokens": (usage_info or {}).get("total_tokens", 0),
+            },
+        )
         yield "done", "", usage_info
 
     except APITimeoutError as e:
+        _log_ai_call(
+            action="chat_stream",
+            model=model_id if model_id else settings.chat_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "timeout"},
+        )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
     except APIError as e:
+        _log_ai_call(
+            action="chat_stream",
+            model=model_id if model_id else settings.chat_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "api"},
+        )
         logger.error(f"模型调用失败: {e}", exc_info=True)
         raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
@@ -244,6 +325,7 @@ async def analyze(questions_text: str) -> dict:
     Raises:
         LLMServiceError: 调用失败、超时或返回非法 JSON
     """
+    start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
             model=settings.analysis_model,
@@ -253,6 +335,13 @@ async def analyze(questions_text: str) -> dict:
         )
         raw = response.choices[0].message.content or "{}"
         result = json.loads(raw)
+        _log_ai_call(
+            action="analyze",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=True,
+            extra={"total_tokens": response.usage.total_tokens if response.usage else 0},
+        )
 
         return {
             "analysis_text": result.get("analysis_text", ""),
@@ -262,14 +351,27 @@ async def analyze(questions_text: str) -> dict:
         }
 
     except APITimeoutError as e:
+        _log_ai_call(
+            action="analyze",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "timeout"},
+        )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
     except (APIError, json.JSONDecodeError) as e:
+        _log_ai_call(
+            action="analyze",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "api_or_json"},
+        )
         logger.error(f"模型调用失败: {e}", exc_info=True)
         raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
-
-async def summarize_report(daily_summaries: str) -> str:
+async def summarize_report(daily_summaries: str) -> dict:
     """
     教师端：汇总多天的 daily_analysis_text，生成完整学习报告。
 
@@ -277,22 +379,47 @@ async def summarize_report(daily_summaries: str) -> str:
         daily_summaries: 拼接好的多天分析文本（调用方负责限制 ≤30 天）
 
     Returns:
-        LLM 生成的完整汇总报告文本
+        包含 report_text, profile, total_score 等字段的字典
 
     Raises:
-        LLMServiceError: 调用失败或超时
+        LLMServiceError: 调用失败、超时或解析失败
     """
+    start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
             model=settings.analysis_model,
             messages=_build_messages(SUMMARIZE_REPORT_PROMPT, daily_summaries),
+            response_format={"type": "json_object"},
             temperature=0.5,
         )
-        return response.choices[0].message.content or ""
+        raw = response.choices[0].message.content or "{}"
+        result = json.loads(raw)
+        _log_ai_call(
+            action="summarize_report",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=True,
+            extra={"total_tokens": response.usage.total_tokens if response.usage else 0},
+        )
+        return result
 
     except APITimeoutError as e:
+        _log_ai_call(
+            action="summarize_report",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "timeout"},
+        )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
-    except APIError as e:
+    except (APIError, json.JSONDecodeError) as e:
+        _log_ai_call(
+            action="summarize_report",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "api_or_json"},
+        )
         logger.error(f"模型调用失败: {e}", exc_info=True)
         raise LLMServiceError("模型调用失败：服务异常或配置错误")

@@ -34,6 +34,22 @@ class QuestionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class UsageRecordOut(BaseModel):
+    """学生查看自己的模型使用记录。"""
+    id: uuid.UUID
+    session_id: str | None
+    model_id: str | None
+    tokens: int | None
+    created_at: datetime
+
+
+class UserIdentityOut(BaseModel):
+    """用于返回当前用户身份信息。"""
+    user_id: str
+    role: str
+    created_at: datetime
+
+
 class SessionOut(BaseModel):
     """会话列表单条记录响应体。"""
     id: str
@@ -46,3 +62,15 @@ class SessionOut(BaseModel):
 class SessionRenameRequest(BaseModel):
     """修改会话标题请求体。"""
     title: str = Field(..., min_length=1, max_length=100, description="新的会话标题, 长度限制1-100字符")
+
+
+class TempRegisterRequest(BaseModel):
+    """临时注册请求体。"""
+    user_id: str = Field(..., min_length=1, max_length=100, description="自定义用户 ID")
+
+
+class StudentRegisterRequest(BaseModel):
+    """学生注册请求体。"""
+    real_name: str = Field(..., min_length=1, max_length=100, description="真实姓名")
+    student_no: str = Field(..., min_length=6, max_length=50, description="学号")
+    password: str = Field(..., min_length=6, max_length=100, description="注册密码")

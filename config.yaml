@@ -63,6 +63,8 @@ app:
   db_cleanup_size_gb: 80
   # Batch 任务轮询间隔（分钟）
   batch_poll_minutes: 15
+  # 教师端批量导出时的学生并发数
+  export_concurrency: 10
 
 logging:
   # 日志根目录

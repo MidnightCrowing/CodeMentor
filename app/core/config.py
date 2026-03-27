@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     db_cleanup_size_gb: int = _yaml["app"].get("db_cleanup_size_gb", 80)
     log_dir: str = _yaml.get("logging", {}).get("log_dir", "./logs")
     batch_poll_minutes: int = _yaml["app"].get("batch_poll_minutes", 15)
+    export_concurrency: int = _yaml["app"].get("export_concurrency", 10)
 
 
 # 全局单例，项目各处 import 此对象使用

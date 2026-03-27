@@ -19,7 +19,7 @@ services/analysis_service.py
 测试入口：tests/test_analysis_service.py
 """
 
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -30,7 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.prompts import ANALYSIS_SYSTEM_PROMPT
-from app.models.models import DailyAnalysis, Question, User, ModelUsageStat, AnalysisBatchJob
+from app.models.models import (
+    DailyAnalysis,
+    Question,
+    User,
+    ModelUsageStat,
+    AnalysisBatchJob,
+    SummaryReport,
+)
 from app.services import batch_service, llm_service
 from app.services.llm_service import LLMServiceError
 
@@ -264,20 +271,151 @@ async def generate_report(db: AsyncSession, user_id: str) -> str:
     )
 
     if not rows:
-        raise ValueError(f"用户 {user_id} 在最近 {settings.max_report_days} 天内无分析数据")
+        raise ValueError(f"用户 {user_id} 在最近 {settings.max_report_days} 内无分析数据")
 
     # 拼接所有分析文本
     summaries = "\n\n".join(
         f"【{row.date}】{row.analysis_text}" for row in rows
     )
 
-    return await llm_service.summarize_report(summaries)
+    result = await llm_service.summarize_report(summaries)
+    return result.get("report_text") or str(result)
+
+
+def _is_fresh_summary_report(report: SummaryReport) -> bool:
+    return report.created_at.date() == date.today()
+
+
+async def generate_summary_report_payload(
+    db: AsyncSession,
+    user_id: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[str, dict | None, int | None]:
+    """
+    Generate summary report payload (text + json + total_score).
+    """
+    rows = await get_daily_analyses(
+        db,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not rows:
+        raise ValueError("no_daily_analysis")
+
+    summaries = "\n\n".join(f"【{row.date}】{row.analysis_text}" for row in rows)
+    parsed = await llm_service.summarize_report(summaries)
+    report_text = parsed.get("report_text") or ""
+    total_score = parsed.get("total_score")
+    return report_text, parsed, total_score
+
+
+async def get_or_generate_summary_report(
+    db: AsyncSession,
+    user_id: str,
+    start_date: str,
+    end_date: str,
+    force: bool = False,
+) -> SummaryReport:
+    cached = await get_summary_report(db, user_id=user_id, start_date=start_date, end_date=end_date)
+    if cached and not force and _is_fresh_summary_report(cached):
+        return cached
+
+    report_text, report_json, total_score = await generate_summary_report_payload(
+        db=db,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if cached:
+        cached.report_text = report_text
+        cached.report_json = report_json
+        cached.total_score = total_score
+        cached.updated_at = datetime.now(timezone.utc)
+        await db.flush()
+        return cached
+
+    return await save_summary_report(
+        db=db,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        report_text=report_text,
+        report_json=report_json,
+        total_score=total_score,
+    )
+
+
+def derive_class_code(student_no: str | None) -> str | None:
+    """
+    Derive class code from student_no (including the leading year).
+    Example: 2023984131019 -> 20239841310 (student_no[0:11])
+    """
+    if not student_no or len(student_no) < 11:
+        return None
+    return student_no[0:11]
+
+
+async def list_class_codes(db: AsyncSession) -> list[str]:
+    """
+    Scan users table and return distinct class codes.
+    """
+    stmt = select(User.student_no).where(
+        User.role == "student",
+        User.student_no.is_not(None),
+    )
+    res = await db.execute(stmt)
+    codes = set()
+    for student_no in res.scalars().all():
+        code = derive_class_code(student_no)
+        if code:
+            codes.add(code)
+    return sorted(codes)
+
+
+async def get_summary_report(
+    db: AsyncSession,
+    user_id: str,
+    start_date: str,
+    end_date: str,
+) -> SummaryReport | None:
+    stmt = select(SummaryReport).where(
+        SummaryReport.user_id == user_id,
+        SummaryReport.start_date == start_date,
+        SummaryReport.end_date == end_date,
+    )
+    res = await db.execute(stmt)
+    return res.scalars().first()
+
+
+async def save_summary_report(
+    db: AsyncSession,
+    user_id: str,
+    start_date: str,
+    end_date: str,
+    report_text: str,
+    report_json: dict | None,
+    total_score: int | None,
+) -> SummaryReport:
+    report = SummaryReport(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        report_text=report_text,
+        report_json=report_json,
+        total_score=total_score,
+    )
+    db.add(report)
+    await db.flush()
+    return report
 
 
 async def list_students(
     db: AsyncSession,
     limit: int,
     offset: int,
+    class_code: str | None = None,
 ) -> list[User]:
     """
     获取学生列表（教师端使用）。
@@ -286,17 +424,17 @@ async def list_students(
         db:     数据库会话
         limit:  分页条数
         offset: 分页偏移
+        class_code: 可选的班级代码过滤
 
     Returns:
         User 对象列表（仅包含 role=student）
     """
-    stmt = (
-        select(User)
-        .where(User.role == "student")
-        .order_by(User.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    stmt = select(User).where(User.role == "student")
+    if class_code:
+        # 基于派生规则：student_no[0:11] 对应 SQL 中的 substring(student_no, 1, 11)
+        stmt = stmt.where(func.substring(User.student_no, 1, 11) == class_code)
+
+    stmt = stmt.order_by(User.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 

@@ -1,0 +1,41 @@
+services:
+  # 后端应用服务
+  webapp:
+    build: .
+    container_name: codementor_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./config.yaml:/app/config.yaml
+    env_file:
+      - .env
+    environment:
+      # 如果在 docker-compose 中连接 db 容器，建议在 .env 中设置 DATABASE_URL 指向 db 服务
+      # 例如：postgresql+asyncpg://postgres:password@db:5432/codementor
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:password@db:5432/codementor}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 数据库服务
+  db:
+    image: postgres:18-alpine
+    container_name: codementor_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: codementor
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

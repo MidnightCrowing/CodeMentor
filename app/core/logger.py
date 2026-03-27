@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -14,12 +15,25 @@ def setup_logging():
         "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
     )
 
+    class _IgnoreCancelledPoolClose(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.name.startswith("sqlalchemy.pool"):
+                if record.exc_info and isinstance(record.exc_info[1], asyncio.CancelledError):
+                    return False
+                msg = record.getMessage()
+                if "CancelledError" in msg and "terminate" in msg:
+                    return False
+            return True
+
+    ignore_cancelled_pool = _IgnoreCancelledPoolClose()
+
     # 1. 错误日志 (error.log) 每天午夜切割，保留30天
     error_handler = TimedRotatingFileHandler(
         log_dir / "error.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
     )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(fmt)
+    error_handler.addFilter(ignore_cancelled_pool)
     error_handler.suffix = "%Y-%m-%d.log"
 
     # 2. 应用日志 (app.log) 每天午夜切割，保留30天
@@ -28,12 +42,21 @@ def setup_logging():
     )
     app_handler.setLevel(logging.INFO)
     app_handler.setFormatter(fmt)
+    app_handler.addFilter(ignore_cancelled_pool)
     app_handler.suffix = "%Y-%m-%d.log"
 
     # 3. 控制台输出 (方便开发调试)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(fmt)
+    console_handler.addFilter(ignore_cancelled_pool)
+
+    ai_handler = TimedRotatingFileHandler(
+        log_dir / "ai.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
+    )
+    ai_handler.setLevel(logging.INFO)
+    ai_handler.setFormatter(fmt)
+    ai_handler.suffix = "%Y-%m-%d.log"
 
     # 配置根日志器
     root_logger = logging.getLogger()
@@ -48,6 +71,12 @@ def setup_logging():
     root_logger.addHandler(console_handler)
 
     # 4. 访问日志 (access.log) - 为 uvicorn.access 提供独立文件
+    ai_logger = logging.getLogger("ai")
+    if ai_logger.hasHandlers():
+        ai_logger.handlers.clear()
+    ai_logger.addHandler(ai_handler)
+    ai_logger.propagate = False
+
     access_handler = TimedRotatingFileHandler(
         log_dir / "access.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
     )
