@@ -150,6 +150,38 @@ async def create_export_job(
     return BaseResponse.ok({"job_id": str(job.id)})
 
 
+@router.delete("/analysis/report/export/jobs/{job_id}", response_model=BaseResponse)
+async def delete_export_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    Delete an export job and its result file on disk.
+    Running jobs cannot be deleted.
+    """
+    await check_user_permission(current_user_id, db, "teacher")
+    job = await db.get(SummaryReportExportJob, job_id)
+    if not job:
+        return BaseResponse.error("Job not found")
+    if job.user_id != current_user_id:
+        return BaseResponse.error("No permission")
+    if job.status == "running":
+        return BaseResponse.error("Cannot delete a job that is still running")
+
+    # 删除磁盘文件（如有）
+    if job.result_path and os.path.exists(job.result_path):
+        try:
+            os.remove(job.result_path)
+        except OSError:
+            pass  # 文件删除失败不影响数据库记录的删除
+
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(SummaryReportExportJob).where(SummaryReportExportJob.id == job.id))
+    await db.commit()
+    return BaseResponse.ok("Job deleted")
+
+
 @router.get("/analysis/report/export/jobs", response_model=BaseResponse[list[ExportSummaryReportJobOut]])
 async def list_export_jobs(
     db: AsyncSession = Depends(get_db),
