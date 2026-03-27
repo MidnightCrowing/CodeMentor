@@ -14,9 +14,14 @@ core/config.py
 """
 
 import yaml
+from datetime import timezone, timedelta
 from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# 北京时区 (UTC+8)
+CHINA_TZ = timezone(timedelta(hours=8))
 
 
 # 项目根路径

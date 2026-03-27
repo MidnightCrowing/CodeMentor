@@ -12,9 +12,10 @@ ENV PYTHONPATH /app
 # 安装必要的系统依赖（针对 pydantic, asyncpg 等可能涉及编译的库）
 # 针对国内环境，将 Debian 源替换为阿里云加速
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    apt-get update && apt-get install -y \
+    build-essential \
     libpq-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖（配置清华、阿里、腾讯等多重备用镜像）

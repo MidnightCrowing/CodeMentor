@@ -23,7 +23,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 
-from openai import AsyncOpenAI, APITimeoutError, APIError
+from openai import AsyncOpenAI, APITimeoutError, APIError, NotFoundError
 
 from app.core.config import settings
 from app.core.prompts import (
@@ -142,6 +142,16 @@ async def classify(message: str) -> bool:
         )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时，请稍后重试")
+    except NotFoundError as e:
+        _log_ai_call(
+            action="classify",
+            model=settings.classify_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "not_found"},
+        )
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("该模型不支持或模型不存在")
     except (APIError, json.JSONDecodeError) as e:
         _log_ai_call(
             action="classify",
@@ -182,6 +192,16 @@ async def generate_session_title(message: str) -> str:
             ok=True,
         )
         return title_text.strip(' \n"\'。')[:10]
+    except NotFoundError as e:
+        _log_ai_call(
+            action="title",
+            model=settings.title_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "not_found"},
+        )
+        logger.warning(f"生成标题失败: 该模型不支持或模型不存在")
+        return "新会话"
     except Exception as e:
         _log_ai_call(
             action="title",
@@ -289,6 +309,16 @@ async def chat_stream(
         )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
+    except NotFoundError as e:
+        _log_ai_call(
+            action="chat_stream",
+            model=target_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "not_found"},
+        )
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("该模型不支持或模型不存在")
     except APIError as e:
         _log_ai_call(
             action="chat_stream",
@@ -360,6 +390,16 @@ async def analyze(questions_text: str) -> dict:
         )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
+    except NotFoundError as e:
+        _log_ai_call(
+            action="analyze",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "not_found"},
+        )
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("该模型不支持或模型不存在")
     except (APIError, json.JSONDecodeError) as e:
         _log_ai_call(
             action="analyze",
@@ -413,6 +453,16 @@ async def summarize_report(daily_summaries: str) -> dict:
         )
         logger.error(f"模型调用超时: {e}", exc_info=True)
         raise LLMServiceError("模型调用超时")
+    except NotFoundError as e:
+        _log_ai_call(
+            action="summarize_report",
+            model=settings.analysis_model,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=False,
+            extra={"error": "not_found"},
+        )
+        logger.error(f"模型调用失败: {e}", exc_info=True)
+        raise LLMServiceError("该模型不支持或模型不存在")
     except (APIError, json.JSONDecodeError) as e:
         _log_ai_call(
             action="summarize_report",
