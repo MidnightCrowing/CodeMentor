@@ -311,17 +311,7 @@ async def get_recent_usage(
     await check_user_permission(current_user_id, db, "teacher")
     rows = await analysis_service.get_recent_student_model_usage(db=db, limit=limit)
     data = [
-        RecentModelUsageOut(
-            user_id=r.user_id,
-            date=r.date,
-            model_id=r.model_id,
-            request_count=r.request_count,
-            prompt_tokens=r.prompt_tokens,
-            completion_tokens=r.completion_tokens,
-            total_tokens=r.total_tokens,
-            total_latency_ms=r.total_latency_ms,
-            error_count=r.error_count,
-        )
+        RecentModelUsageOut(**r)
         for r in rows
     ]
     return BaseResponse.ok(data)

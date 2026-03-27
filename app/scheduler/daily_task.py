@@ -24,12 +24,10 @@ from datetime import date
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete, text
-from datetime import timezone, timedelta
-
-from app.core.config import settings
+from app.core.config import settings, CHINA_TZ
 from app.core.database import AsyncSessionLocal
 from app.models.models import Question
-from app.services import analysis_service, report_export_service
+from app.services import analysis_service, report_export_service, db_service
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +37,22 @@ _tasks: set[asyncio.Task] = set()
 _daily_lock = asyncio.Lock()
 _batch_lock = asyncio.Lock()
 _export_trigger = asyncio.Event()
+
+
+async def _database_backup_job() -> None:
+    """
+    凌晨 4 点备份数据库任务。
+    1. 执行备份
+    2. 清理 10 天前的旧备份
+    """
+    logger.info("[定时任务] 开始执行每日数据库备份...")
+    try:
+        path = db_service.backup_database()
+        if path:
+            count = db_service.cleanup_old_backups(days=10)
+            logger.info(f"[定时任务] 数据库备份完成，存放于: {path}，清理了 {count} 个旧备份")
+    except Exception as e:
+        logger.error(f"[定时任务] 数据库备份/清理失败: {e}")
 
 
 def trigger_export_worker() -> None:
@@ -90,7 +104,8 @@ async def _daily_analysis_job() -> None:
     定时任务实体函数。
     每次执行时自动创建独立的数据库会话，保证事务隔离。
     """
-    today = date.today().isoformat()
+    from datetime import datetime
+    today = datetime.now(CHINA_TZ).date().isoformat()
     logger.info(f"[定时任务] 开始执行每日分析：{today}")
 
     async with AsyncSessionLocal() as db:
@@ -108,8 +123,7 @@ async def _daily_analysis_job() -> None:
             
             # 附带执行过期数据物理清理
             if settings.delete_history_days > 0:
-                from app.models.models import _now_utc
-                cutoff_date = _now_utc() - timedelta(days=settings.delete_history_days)
+                cutoff_date = datetime.now(CHINA_TZ) - timedelta(days=settings.delete_history_days)
                 stmt = delete(Question).where(Question.created_at < cutoff_date)
                 res = await db.execute(stmt)
                 logger.info(f"[定时任务] 物理清理过期内容：抹除了 {res.rowcount} 条旧于 {settings.delete_history_days} 天的对话记录")
@@ -212,7 +226,10 @@ def _schedule_batch() -> None:
 def start_scheduler() -> None:
     """
     启动调度器。在 FastAPI lifespan 的 startup 事件中调用。
-    注册每日凌晨 daily_analysis_hour 点执行的任务。
+    注册：
+    1. 每日 3 点：学习分析
+    2. 每日 4 点：数据库备份
+    3. 每周期：Batch 轮询
     """
     # 强制单例预检
     if _scheduler.running:
@@ -220,15 +237,25 @@ def start_scheduler() -> None:
         return
 
     hour = settings.daily_analysis_hour
-    # 每日分析任务 (Cron)
+    # 1. 每日分析任务 (Cron - 3点)
     _scheduler.add_job(
         _schedule_daily,
-        trigger=CronTrigger(hour=hour, minute=0, timezone=timezone.utc),
+        trigger=CronTrigger(hour=hour, minute=0, timezone=CHINA_TZ),
         id="daily_analysis",
         replace_existing=True,
         misfire_grace_time=3600,
     )
-    # 批处理结果轮询 (Interval)
+
+    # 2. 数据库备份任务 (Cron - 4点)
+    _scheduler.add_job(
+        _database_backup_job,
+        trigger=CronTrigger(hour=4, minute=0, timezone=CHINA_TZ),
+        id="database_backup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # 3. 批处理结果轮询 (Interval)
     _scheduler.add_job(
         _schedule_batch,
         trigger="interval",

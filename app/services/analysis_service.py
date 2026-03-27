@@ -765,36 +765,106 @@ async def process_batch_job(
 async def get_recent_student_model_usage(
     db: AsyncSession,
     limit: int = 10,
-) -> list[ModelUsageStat]:
+) -> list[dict]:
     """
-    获取最近 10 名学生的模型使用记录（按日期倒序）。
+    获取最近 N 名学生【过去 7 天】的模型使用累计统计。
+    model_id 字段会列出使用量最高的前 3 个模型，以空格分隔。
     """
-    latest_subq = (
-        select(
-            ModelUsageStat.user_id.label("user_id"),
-            func.max(ModelUsageStat.date).label("max_date"),
-        )
+    from app.core.config import CHINA_TZ
+    from datetime import datetime
+    today_local = datetime.now(CHINA_TZ).date()
+    cutoff_date = (today_local - timedelta(days=6)).isoformat()
+
+    # 1. 找到这 7 天内最活跃的学生列表
+    active_students_subq = (
+        select(ModelUsageStat.user_id)
         .join(User, User.user_id == ModelUsageStat.user_id)
-        .where(User.role == "student")
+        .where(
+            and_(
+                User.role == "student",
+                ModelUsageStat.date >= cutoff_date
+            )
+        )
         .group_by(ModelUsageStat.user_id)
-        .order_by(func.max(ModelUsageStat.date).desc())
+        .order_by(func.sum(ModelUsageStat.request_count).desc())
         .limit(limit)
         .subquery()
     )
 
+    # 2. 查询这些学生在这 7 天内按 (user_id, model_id) 聚合的明细
     stmt = (
-        select(ModelUsageStat)
-        .join(
-            latest_subq,
-            and_(
-                ModelUsageStat.user_id == latest_subq.c.user_id,
-                ModelUsageStat.date == latest_subq.c.max_date,
-            ),
+        select(
+            ModelUsageStat.user_id,
+            ModelUsageStat.model_id,
+            func.max(ModelUsageStat.date).label("last_date"),
+            func.sum(ModelUsageStat.request_count).label("req_cnt"),
+            func.sum(ModelUsageStat.prompt_tokens).label("p_tok"),
+            func.sum(ModelUsageStat.completion_tokens).label("c_tok"),
+            func.sum(ModelUsageStat.total_tokens).label("t_tok"),
+            func.sum(ModelUsageStat.total_latency_ms).label("t_lat"),
+            func.sum(ModelUsageStat.error_count).label("err_cnt"),
         )
-        .order_by(ModelUsageStat.date.desc(), ModelUsageStat.user_id)
+        .join(active_students_subq, ModelUsageStat.user_id == active_students_subq.c.user_id)
+        .where(ModelUsageStat.date >= cutoff_date)
+        .group_by(ModelUsageStat.user_id, ModelUsageStat.model_id)
     )
+    
     res = await db.execute(stmt)
-    return list(res.scalars().all())
+    detailed_rows = res.all()
+
+    # 3. 在 Python 层按 user_id 汇总
+    user_summary: dict[str, dict] = {}
+    for r in detailed_rows:
+        uid = r.user_id
+        if uid not in user_summary:
+            user_summary[uid] = {
+                "user_id": uid,
+                "date": r.last_date,
+                "models": [], # 存储 (model_id, count) 用于排序
+                "request_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "total_latency_ms": 0,
+                "error_count": 0,
+            }
+        
+        s = user_summary[uid]
+        # 更新最后活跃日期
+        if r.last_date > s["date"]:
+            s["date"] = r.last_date
+            
+        s["request_count"] += int(r.req_cnt or 0)
+        s["prompt_tokens"] += int(r.p_tok or 0)
+        s["completion_tokens"] += int(r.c_tok or 0)
+        s["total_tokens"] += int(r.t_tok or 0)
+        s["total_latency_ms"] += int(r.t_lat or 0)
+        s["error_count"] += int(r.err_cnt or 0)
+        s["models"].append((r.model_id, int(r.req_cnt or 0)))
+
+    # 4. 格式化最终结果
+    result = []
+    # 按照总请求量排序（保持和 subquery 一致）
+    sorted_users = sorted(user_summary.values(), key=lambda x: x["request_count"], reverse=True)
+    
+    for s in sorted_users:
+        # 取前 3 模型名
+        top_models = sorted(s["models"], key=lambda x: x[1], reverse=True)[:3]
+        model_str = " ".join([m[0] for m in top_models])
+        
+        result.append({
+            "user_id": s["user_id"],
+            "date": s["date"],
+            "model_id": model_str,
+            "request_count": s["request_count"],
+            "prompt_tokens": s["prompt_tokens"],
+            "completion_tokens": s["completion_tokens"],
+            "total_tokens": s["total_tokens"],
+            "total_latency_ms": s["total_latency_ms"],
+            "error_count": s["error_count"],
+        })
+        
+    return result
 
 
 def _parse_date(date_str: str) -> date:
