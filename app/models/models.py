@@ -45,8 +45,15 @@ class User(Base):
 
     user_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="student", server_default="student")
+    real_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    student_no: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now_utc
+    )
+
+    __table_args__ = (
+        Index("idx_users_student_no", "student_no", unique=True),
     )
 
 
@@ -172,6 +179,75 @@ class DailyAnalysis(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "date", name="uq_user_date"),
         Index("idx_user_date", "user_id", "date"),
+    )
+
+
+# 总报告缓存表
+class SummaryReport(Base):
+    """
+    教师端总报告（多日汇总）缓存表。
+    用于避免重复生成，提高响应速度。
+    """
+    __tablename__ = "summary_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "YYYY-MM-DD"
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)  # "YYYY-MM-DD"
+    report_text: Mapped[str] = mapped_column(Text, nullable=False)
+    report_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "start_date", "end_date", name="uq_summary_report_dim"),
+        Index("idx_summary_report_user", "user_id"),
+        Index("idx_summary_report_range", "start_date", "end_date"),
+    )
+
+
+# 总报告导出任务表
+class SummaryReportExportJob(Base):
+    """
+    教师端批量导出汇总报告的异步任务表。
+    """
+    __tablename__ = "summary_report_export_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    class_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    course_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    teacher_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    school_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    include_text_evaluation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    result_path: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+    )
+
+    __table_args__ = (
+        Index("idx_summary_export_user", "user_id"),
+        Index("idx_summary_export_status", "status"),
+        Index("idx_summary_export_created_at", "created_at"),
     )
 
 

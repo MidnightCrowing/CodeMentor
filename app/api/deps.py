@@ -53,3 +53,12 @@ async def check_user_permission(user_id: str | None, db: AsyncSession, required_
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
         
     return user
+
+
+async def require_user(user_id: str, db: AsyncSession) -> User:
+    """确保用户存在，不存在则抛出 403。"""
+    res = await db.execute(select(User).where(User.user_id == user_id))
+    user = res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="该用户不存在")
+    return user

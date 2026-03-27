@@ -61,8 +61,13 @@ class ReportRequest(BaseModel):
 
 # 完整报告响应体
 class ReportOut(BaseModel):
-    """POST /api/v1/analysis/report 响应结构。"""
-    report: str = Field(description="完整学习报告文本（LLM 汇总生成）")
+    """POST /api/v1/analysis/report 响应结构（全量报告 JSON）。"""
+    report_text: str = Field(description="完整学习报告文本")
+    total_score: int | None = Field(None, description="综合评估分")
+    profile: dict | None = Field(None, description="各项能力维度得分")
+    strengths: list[str] = Field(default_factory=list, description="优势")
+    weaknesses: list[str] = Field(default_factory=list, description="薄弱点")
+    suggestions: list[str] = Field(default_factory=list, description="学习建议")
 
 
 class StudentOut(BaseModel):
@@ -146,3 +151,34 @@ class ManualDailyAnalysisRequest(BaseModel):
     """POST /api/v1/analysis/daily/run 请求体。"""
     target_user_id: str = Field(..., description="目标学生用户 ID")
     date: str | None = Field(None, description="分析日期，格式 YYYY-MM-DD，默认当天")
+
+
+class ExportSummaryReportRequest(BaseModel):
+    """POST /api/v1/analysis/report/export/jobs request body."""
+    class_code: str | None = Field(None, description="Class code derived from student_no")
+    include_text_evaluation: bool = Field(False, description="Include evaluation text column")
+    course_name: str | None = Field(None, description="Course name for header")
+    teacher_name: str | None = Field(None, description="Teacher name for header")
+    school_name: str | None = Field(None, description="School name for header")
+
+
+class ExportSummaryReportJobOut(BaseModel):
+    """Job status for summary report export."""
+    job_id: str
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    progress: float
+    created_at: datetime
+    updated_at: datetime
+    result_ready: bool
+    class_code: str | None = None
+    school_name: str | None = None
+    course_name: str | None = None
+    teacher_name: str | None = None
+
+
+class ClassCodeOut(BaseModel):
+    """Class code item."""
+    class_code: str

@@ -16,12 +16,75 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, check_user_permission, get_current_user_id
 from app.core.config import settings
 from app.core.limiter import limiter
-from app.models.models import Question, Session
+from app.core.request_context import get_user_role
+from app.core.security import hash_password
+from app.models.models import Question, Session, User
 from app.schemas.base import BaseResponse
-from app.schemas.chat_schema import ChatRequest, QuestionOut, SessionOut, SessionRenameRequest
+from app.schemas.chat_schema import (
+    ChatRequest,
+    QuestionOut,
+    SessionOut,
+    SessionRenameRequest,
+    UsageRecordOut,
+    UserIdentityOut,
+    TempRegisterRequest,
+    StudentRegisterRequest,
+)
 from app.services.chat_service import chat_stream_generator
 
 router = APIRouter()
+
+
+def _exempt_teacher_admin() -> bool:
+    role = get_user_role()
+    return role in ("teacher", "admin")
+
+
+@router.post("/register/temp", response_model=BaseResponse[dict])
+async def temp_register(
+    body: TempRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Temp register for students with custom ID.
+    """
+    res = await db.execute(select(User).where(User.user_id == body.user_id))
+    if res.scalars().first():
+        return BaseResponse.error("Account already exists")
+
+    user = User(user_id=body.user_id, role="student")
+    db.add(user)
+    await db.flush()
+    return BaseResponse.ok({"user_id": body.user_id})
+
+
+@router.post("/register", response_model=BaseResponse[dict])
+async def register_student(
+    body: StudentRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Register student account only.
+    """
+    # Prevent duplicate user_id or student_no
+    res = await db.execute(
+        select(User).where(
+            (User.user_id == body.student_no) | (User.student_no == body.student_no)
+        )
+    )
+    if res.scalars().first():
+        return BaseResponse.error("Account already exists")
+
+    user = User(
+        user_id=body.student_no,
+        role="student",
+        real_name=body.real_name,
+        student_no=body.student_no,
+        password_hash=hash_password(body.password),
+    )
+    db.add(user)
+    await db.flush()
+    return BaseResponse.ok({"user_id": user.user_id})
 
 
 @router.get("/models")
@@ -151,7 +214,7 @@ async def rename_session(
 
 
 @router.post("/chat")
-@limiter.limit(settings.rate_limit_chat)
+@limiter.limit(settings.rate_limit_chat, exempt_when=_exempt_teacher_admin)
 async def chat(
     request: Request,
     body: ChatRequest,
@@ -209,4 +272,55 @@ async def get_questions(
     result = await db.execute(stmt)
     questions = result.scalars().all()
     data = [QuestionOut.model_validate(q) for q in questions]
+    return BaseResponse.ok(data)
+
+
+@router.get("/usage", response_model=BaseResponse[list[UsageRecordOut]])
+async def get_usage_records(
+    limit: int = Query(50, ge=1, le=200, description="Page size"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    db: AsyncSession = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    Student: get own model usage records.
+    """
+    await check_user_permission(current_user_id, db, "student")
+    stmt = (
+        select(Question)
+        .where(Question.user_id == current_user_id)
+        .where(Question.is_deleted == False)
+        .order_by(Question.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    res = await db.execute(stmt)
+    rows = res.scalars().all()
+    data = [
+        UsageRecordOut(
+            id=r.id,
+            session_id=r.session_id,
+            model_id=r.model,
+            tokens=r.tokens,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+    return BaseResponse.ok(data)
+
+
+@router.get("/whoami", response_model=BaseResponse[UserIdentityOut])
+async def whoami(
+    db: AsyncSession = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    Return current user identity.
+    """
+    user = await check_user_permission(current_user_id, db, "student")
+    data = UserIdentityOut(
+        user_id=user.user_id,
+        role=user.role,
+        created_at=user.created_at,
+    )
     return BaseResponse.ok(data)

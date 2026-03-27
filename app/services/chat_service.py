@@ -224,10 +224,24 @@ async def chat_stream_generator(
 
     except LLMServiceError as e:
         yield _sse("error", message=str(e))
+        # 记录失败指标（即使没有任何输出也要计入 error_count）
+        chat_latency_ms = int((time.perf_counter() - chat_start_time) * 1000)
+        actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
+        await _upsert_model_usage(
+            db=db,
+            user_id=user_id,
+            model_id=actual_model,
+            prompt_tokens=usage_info.get("prompt_tokens", 0) if usage_info else 0,
+            completion_tokens=usage_info.get("completion_tokens", 0) if usage_info else 0,
+            total_tokens=usage_info.get("total_tokens", 0) if usage_info else 0,
+            latency_ms=chat_latency_ms,
+            is_error=True,
+        )
+
         # 流中断，仍尝试保存已收到的部分（如有）
         if not full_answer_parts and not reasoning_parts:
             return
-        
+
         answer_text = "".join(full_answer_parts)
         if reasoning_parts:
             reasoning_text = "".join(reasoning_parts)
@@ -246,20 +260,6 @@ async def chat_stream_generator(
             tokens=usage_info.get("total_tokens") if usage_info else None,
         )
         
-        # 记录失败指标
-        chat_latency_ms = int((time.perf_counter() - chat_start_time) * 1000)
-        actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
-        await _upsert_model_usage(
-            db=db,
-            user_id=user_id,
-            model_id=actual_model,
-            prompt_tokens=usage_info.get("prompt_tokens", 0) if usage_info else 0,
-            completion_tokens=usage_info.get("completion_tokens", 0) if usage_info else 0,
-            total_tokens=usage_info.get("total_tokens", 0) if usage_info else 0,
-            latency_ms=chat_latency_ms,
-            is_error=True,
-        )
-
     except asyncio.CancelledError:
         # 客户端（前端）主动断开连接 / 点击了停止生成
         # 我们依然需要把已经生成的半截内容落库，并记录 Token 消耗

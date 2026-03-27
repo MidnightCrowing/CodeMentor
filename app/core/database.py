@@ -14,6 +14,9 @@ core/database.py
 """
 
 from collections.abc import AsyncGenerator
+import asyncio
+import logging
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -23,6 +26,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 
 # 异步引擎
 # pool_pre_ping 在每次使用前检活连接（避免连接超时断开导致错误）
@@ -57,7 +61,17 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
+            try:
+                await session.commit()
+            except PendingRollbackError:
+                # Transaction already rolled back (often due to cancellation); ensure clean state.
+                await session.rollback()
+                return
+        except asyncio.CancelledError:
+            # Request was cancelled; rollback and avoid noisy error logs.
+            await session.rollback()
+            logger.info("Request cancelled; connection interrupted.")
+            return
         except Exception:
             await session.rollback()
             raise

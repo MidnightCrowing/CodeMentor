@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from slowapi.errors import RateLimitExceeded
@@ -16,9 +17,53 @@ from app.api.v1.router import router as v1_router
 from app.scheduler.daily_task import start_scheduler, stop_scheduler
 from app.core.logger import setup_logging
 from app.core.startup import sync_models_to_db
+from app.core.database import AsyncSessionLocal
+from app.core.request_context import set_user_role
+from app.models.models import User
+from sqlalchemy import select
 
 setup_logging()
 logger = logging.getLogger(__name__)
+
+
+def _extract_user_id(request: Request) -> str | None:
+    auth = request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        if token:
+            return token
+
+    x_user_id = request.headers.get("X-User-Id")
+    if x_user_id:
+        return x_user_id
+
+    cookie_user_id = request.cookies.get("user_id")
+    if cookie_user_id:
+        return cookie_user_id
+
+    return None
+
+
+async def attach_user_role(request: Request, call_next):
+    try:
+        if request.url.path.startswith("/api/v1/chat"):
+            user_id = _extract_user_id(request)
+            if user_id:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        res = await db.execute(select(User).where(User.user_id == user_id))
+                        user = res.scalars().first()
+                        if user:
+                            request.state.user_role = user.role
+                            set_user_role(user.role)
+                except Exception:
+                    # If lookup fails, fall back to normal rate limiting.
+                    pass
+        response = await call_next(request)
+        return response
+    finally:
+        # Clear request-scoped role to avoid leaking across requests.
+        set_user_role(None)
 
 
 # 生命周期管理
@@ -30,10 +75,12 @@ async def lifespan(app: FastAPI):
     """
     logger.info("应用启动中...")
     await sync_models_to_db()
+    from app.services import report_export_service
+    await report_export_service.reset_stale_jobs()
     start_scheduler()
     yield
     logger.info("应用关闭中...")
-    stop_scheduler()
+    await stop_scheduler()
 
 
 # FastAPI 实例
@@ -45,6 +92,7 @@ app = FastAPI(
 )
 
 # 全局挂载 limiter
+app.middleware("http")(attach_user_role)
 app.state.limiter = limiter
 
 # 配置 CORS 跨域请求（支持前后端分离集成）
@@ -110,10 +158,3 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 # 挂载路由
 app.include_router(v1_router)
-
-
-# 健康检查
-@app.get("/health", tags=["系统"])
-async def health_check():
-    """服务心跳检测接口。"""
-    return BaseResponse.ok({"status": "ok"})
