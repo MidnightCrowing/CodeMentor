@@ -1,19 +1,72 @@
-import logging
 import asyncio
+import logging
 import sys
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import CHINA_TZ, settings
+
+
+class DailyFolderFileHandler(logging.Handler):
+    def __init__(
+        self,
+        base_dir: Path,
+        filename: str,
+        level: int = logging.NOTSET,
+        encoding: str = "utf-8",
+    ):
+        super().__init__(level)
+        self.base_dir = Path(base_dir)
+        self.filename = filename
+        self.encoding = encoding
+        self._current_date = self._today()
+        self._stream = None
+        self._open_stream()
+
+    def _today(self) -> str:
+        return datetime.now(CHINA_TZ).date().isoformat()
+
+    def _log_path(self) -> Path:
+        day_dir = self.base_dir / self._current_date
+        day_dir.mkdir(parents=True, exist_ok=True)
+        return day_dir / self.filename
+
+    def _open_stream(self) -> None:
+        path = self._log_path()
+        self._stream = open(path, "a", encoding=self.encoding)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.acquire()
+            current = self._today()
+            if current != self._current_date:
+                self._current_date = current
+                if self._stream:
+                    self._stream.close()
+                self._open_stream()
+            msg = self.format(record)
+            if self._stream:
+                self._stream.write(msg + "\n")
+                self._stream.flush()
+        except Exception:
+            self.handleError(record)
+        finally:
+            self.release()
+
+    def close(self) -> None:
+        try:
+            if self._stream:
+                self._stream.close()
+                self._stream = None
+        finally:
+            super().close()
+
 
 def setup_logging():
     log_dir = Path(settings.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 格式化器
-    fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
-    )
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s")
 
     class _IgnoreCancelledPoolClose(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
@@ -25,44 +78,39 @@ def setup_logging():
                     return False
             return True
 
-    ignore_cancelled_pool = _IgnoreCancelledPoolClose()
+    class _IgnoreApschedulerInfo(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.name.startswith("apscheduler") and record.levelno < logging.WARNING:
+                return False
+            return True
 
-    # 1. 错误日志 (error.log) 每天午夜切割，保留30天
-    error_handler = TimedRotatingFileHandler(
-        log_dir / "error.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
-    )
+    ignore_cancelled_pool = _IgnoreCancelledPoolClose()
+    ignore_apscheduler_info = _IgnoreApschedulerInfo()
+
+    error_handler = DailyFolderFileHandler(log_dir, "error.log", level=logging.ERROR)
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(fmt)
     error_handler.addFilter(ignore_cancelled_pool)
-    error_handler.suffix = "%Y-%m-%d.log"
+    error_handler.addFilter(ignore_apscheduler_info)
 
-    # 2. 应用日志 (app.log) 每天午夜切割，保留30天
-    app_handler = TimedRotatingFileHandler(
-        log_dir / "app.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
-    )
+    app_handler = DailyFolderFileHandler(log_dir, "app.log", level=logging.INFO)
     app_handler.setLevel(logging.INFO)
     app_handler.setFormatter(fmt)
     app_handler.addFilter(ignore_cancelled_pool)
-    app_handler.suffix = "%Y-%m-%d.log"
+    app_handler.addFilter(ignore_apscheduler_info)
 
-    # 3. 控制台输出 (方便开发调试)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(fmt)
     console_handler.addFilter(ignore_cancelled_pool)
+    console_handler.addFilter(ignore_apscheduler_info)
 
-    ai_handler = TimedRotatingFileHandler(
-        log_dir / "ai.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
-    )
+    ai_handler = DailyFolderFileHandler(log_dir, "ai.log", level=logging.INFO)
     ai_handler.setLevel(logging.INFO)
     ai_handler.setFormatter(fmt)
-    ai_handler.suffix = "%Y-%m-%d.log"
 
-    # 配置根日志器
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    
-    # 清理已有 handler，避免重复
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
 
@@ -70,31 +118,30 @@ def setup_logging():
     root_logger.addHandler(app_handler)
     root_logger.addHandler(console_handler)
 
-    # 4. 访问日志 (access.log) - 为 uvicorn.access 提供独立文件
     ai_logger = logging.getLogger("ai")
     if ai_logger.hasHandlers():
         ai_logger.handlers.clear()
     ai_logger.addHandler(ai_handler)
     ai_logger.propagate = False
 
-    access_handler = TimedRotatingFileHandler(
-        log_dir / "access.log", when="MIDNIGHT", interval=1, backupCount=30, encoding="utf-8"
-    )
+    access_handler = DailyFolderFileHandler(log_dir, "access.log", level=logging.INFO)
     access_handler.setLevel(logging.INFO)
     access_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-    access_handler.suffix = "%Y-%m-%d.log"
-    
+
     uvicorn_access_logger = logging.getLogger("uvicorn.access")
     if uvicorn_access_logger.hasHandlers():
         uvicorn_access_logger.handlers.clear()
     uvicorn_access_logger.addHandler(access_handler)
-    uvicorn_access_logger.propagate = False  # 不要将 access 日志同步输出到 app.log 进而污染
+    uvicorn_access_logger.propagate = False
 
-    # 可选：配置 sqlalchemy 日志以便记录慢SQL或报错
     sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
     sqlalchemy_logger.setLevel(logging.WARNING)
     sqlalchemy_logger.addHandler(error_handler)
     sqlalchemy_logger.addHandler(app_handler)
 
-    logging.getLogger(__name__).info("日志系统启动：采用每日定点切割保留30天策略。")
+    # APScheduler 仅保留 WARNING 及以上，避免大量心跳日志淹没业务日志。
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
+    logging.getLogger(__name__).info("日志系统已启动，按日期分目录写入日志文件")

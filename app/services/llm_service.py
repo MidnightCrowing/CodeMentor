@@ -1,29 +1,19 @@
 """
-services/llm_service.py
-========================
-LLM 服务封装层（核心模块）。
+LLM 服务封装。
 
-职责：
-- 封装所有对 OpenAI API 的调用，外部模块不直接操作 openai 包
-- 提供三种调用模式：
-  1. classify()    前置轻量分类（是否为编程问题），不走流式
-  2. chat_stream() 主对话，流式生成，AsyncGenerator 形式
-  3. analyze()     离线分析，不走流式，要求返回严格 JSON
-
-设计原则：
-- 所有调用必须设置 timeout（来自 settings.llm_timeout）
-- 超时或网络异常统一封装为 LLMServiceError
-- 与 schemas、models 层完全解耦：只接收/返回基础 Python 类型和 dict
-
-测试入口：tests/test_llm_service.py
+- 统一封装 OpenAI 兼容接口调用
+- 对上层返回简洁、安全的错误提示
+- 详细诊断信息写入日志，便于排查
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import time
 from collections.abc import AsyncGenerator
 
-from openai import AsyncOpenAI, APITimeoutError, APIError, NotFoundError
+from openai import APIError, APITimeoutError, AsyncOpenAI, NotFoundError
 
 from app.core.config import settings
 from app.core.prompts import (
@@ -38,14 +28,10 @@ logger = logging.getLogger(__name__)
 ai_logger = logging.getLogger("ai")
 
 
-# 自定义异常
 class LLMServiceError(Exception):
-    """LLM 调用失败时抛出，携带可读的错误信息。"""
-    pass
+    """向调用方返回的安全错误信息。"""
 
 
-# 客户端单例
-# 模块级单例，避免每次请求重复创建连接
 _client = AsyncOpenAI(
     api_key=settings.chat_api_key,
     base_url=settings.llm_base_url,
@@ -59,18 +45,7 @@ _classify_client = AsyncOpenAI(
 )
 
 
-# 工具函数
 def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
-    """
-    构建标准 OpenAI messages 数组。
-
-    Args:
-        system_prompt: 系统提示词
-        user_message:  用户消息内容
-
-    Returns:
-        messages 列表，格式为 [{"role": ..., "content": ...}, ...]
-    """
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
@@ -92,35 +67,62 @@ def _log_ai_call(
     }
     if extra:
         payload.update(extra)
-    ai_logger.info(f"AI_CALL {payload}")
+    ai_logger.info("AI_CALL %s", payload)
 
 
-# 前置分类
+def _raise_llm_service_error(
+    *,
+    action: str,
+    model: str,
+    start: float,
+    error_code: str,
+    user_message: str,
+    exc: Exception,
+) -> None:
+    _log_ai_call(
+        action=action,
+        model=model,
+        elapsed_ms=int((time.perf_counter() - start) * 1000),
+        ok=False,
+        extra={"error": error_code},
+    )
+    logger.error(
+        "大模型调用失败: 操作=%s 模型=%s 错误类型=%s 详情=%s",
+        action,
+        model,
+        error_code,
+        exc,
+        exc_info=True,
+    )
+    raise LLMServiceError(user_message) from exc
+
+
+def _title_fallback(reason: str, model: str, start: float, exc: Exception) -> str:
+    _log_ai_call(
+        action="title",
+        model=model,
+        elapsed_ms=int((time.perf_counter() - start) * 1000),
+        ok=False,
+        extra={"error": reason},
+    )
+    logger.warning(
+        "会话标题生成失败: 模型=%s 错误类型=%s 详情=%s",
+        model,
+        reason,
+        exc,
+        exc_info=True,
+    )
+    return "新会话"
 
 
 async def classify(message: str) -> bool:
-    """
-    前置轻量分类：判断用户问题是否为编程类问题。
-
-    使用 classify_model（轻量低成本），要求 JSON 输出。
-    超时或解析失败时抛出 LLMServiceError。
-
-    Args:
-        message: 学生原始提问文本
-
-    Returns:
-        True 表示是编程问题，False 表示不是
-
-    Raises:
-        LLMServiceError: 调用失败或返回非法 JSON
-    """
     start = time.perf_counter()
     try:
         response = await _classify_client.chat.completions.create(
             model=settings.classify_model,
             messages=_build_messages(CLASSIFY_SYSTEM_PROMPT, message),
             response_format={"type": "json_object"},
-            temperature=0,  # 分类任务不需要随机性
+            temperature=0,
         )
         raw = response.choices[0].message.content or "{}"
         result = json.loads(raw)
@@ -131,52 +133,45 @@ async def classify(message: str) -> bool:
             ok=True,
         )
         return bool(result.get("is_programming", False))
-
-    except APITimeoutError as e:
-        _log_ai_call(
+    except APITimeoutError as exc:
+        _raise_llm_service_error(
             action="classify",
             model=settings.classify_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "timeout"},
+            start=start,
+            error_code="timeout",
+            user_message="AI 服务响应超时，请稍后重试",
+            exc=exc,
         )
-        logger.error(f"模型调用超时: {e}", exc_info=True)
-        raise LLMServiceError("模型调用超时，请稍后重试")
-    except NotFoundError as e:
-        _log_ai_call(
+    except NotFoundError as exc:
+        _raise_llm_service_error(
             action="classify",
             model=settings.classify_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "not_found"},
+            start=start,
+            error_code="model_not_found",
+            user_message="AI 模型暂时不可用",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("该模型不支持或模型不存在")
-    except (APIError, json.JSONDecodeError) as e:
-        _log_ai_call(
+    except APIError as exc:
+        _raise_llm_service_error(
             action="classify",
             model=settings.classify_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "api_or_json"},
+            start=start,
+            error_code="provider_error",
+            user_message="AI 服务暂时不可用，请稍后重试",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("模型调用失败：服务异常或配置错误")
+    except json.JSONDecodeError as exc:
+        _raise_llm_service_error(
+            action="classify",
+            model=settings.classify_model,
+            start=start,
+            error_code="invalid_json",
+            user_message="AI 服务返回异常，请稍后重试",
+            exc=exc,
+        )
 
-
-# 标题生成
 
 async def generate_session_title(message: str) -> str:
-    """
-    根据给定的首句消息，生成简短的会话标题。
-    
-    使用 title_model，超时返回默认标题或空串（不抛错影响主流程）。
-
-    Args:
-        message (str): 用户的原始提问文本
-    Returns:
-        str: 提炼的简短标题。发生错误则返回 "新会话"。
-    """
     start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
@@ -191,30 +186,11 @@ async def generate_session_title(message: str) -> str:
             elapsed_ms=int((time.perf_counter() - start) * 1000),
             ok=True,
         )
-        return title_text.strip(' \n"\'。')[:10]
-    except NotFoundError as e:
-        _log_ai_call(
-            action="title",
-            model=settings.title_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "not_found"},
-        )
-        logger.warning(f"生成标题失败: 该模型不支持或模型不存在")
-        return "新会话"
-    except Exception as e:
-        _log_ai_call(
-            action="title",
-            model=settings.title_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "exception"},
-        )
-        logger.warning(f"生成标题失败: {e}")
-        return "新会话"
-
-
-# 流式对话
+        return title_text.strip(' \n"\'，。')[:10] or "新会话"
+    except NotFoundError as exc:
+        return _title_fallback("model_not_found", settings.title_model, start, exc)
+    except (APITimeoutError, APIError, Exception) as exc:
+        return _title_fallback("title_failed", settings.title_model, start, exc)
 
 
 async def chat_stream(
@@ -223,47 +199,28 @@ async def chat_stream(
     enable_thinking: bool = True,
     model_id: str | None = None,
 ) -> AsyncGenerator[tuple[str, str, dict | None], None]:
-    """
-    主对话：流式生成 AI 回答（支持深度思考阶段）。
-
-    通过 AsyncGenerator 逐块 yield 内容片段。
-
-    Args:
-        message: 学生当前提问
-        history: 可选的历史对话列表，格式 [{"role": "user/assistant", "content": "..."}]
-
-    Yields:
-        (chunk_type: str, chunk_data: str, usage: dict | None)
-        - chunk_type 可能是 "content" 或 "reasoning" 或 "done"
-        - 正常内容块："content", "文本内容", None
-        - 思考内容块："reasoning", "思考内容", None
-        - 结束信号："done", "", {"model": str, "total_tokens": int}
-
-    Raises:
-        LLMServiceError: 调用失败或超时
-    """
     messages: list[dict] = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": message})
 
     start = time.perf_counter()
+    target_model = model_id if model_id else settings.chat_model
     try:
-        target_model = model_id if model_id else settings.chat_model
         req_kwargs = {
             "model": target_model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "extra_body": {"enable_thinking": enable_thinking} if enable_thinking is not None else {}
+            "extra_body": {"enable_thinking": enable_thinking}
+            if enable_thinking is not None
+            else {},
         }
-        
-        stream = await _client.chat.completions.create(**req_kwargs)
 
+        stream = await _client.chat.completions.create(**req_kwargs)
         usage_info: dict | None = None
 
         async for chunk in stream:
-            # 末尾 chunk 携带 usage 信息
             if chunk.usage:
                 usage_info = {
                     "model": target_model,
@@ -273,88 +230,58 @@ async def chat_stream(
                 }
 
             delta = chunk.choices[0].delta if chunk.choices else None
-            if delta:
-                content = delta.content
-                # 兼容不同提供商的 reasoning_content 取值
-                if enable_thinking:
-                    reasoning_content = getattr(delta, "reasoning_content", None)
-                    if not reasoning_content and hasattr(delta, "model_extra") and delta.model_extra:
-                        reasoning_content = delta.model_extra.get("reasoning_content")
+            if not delta:
+                continue
 
-                    if reasoning_content:
-                        yield "reasoning", reasoning_content, None
-                
-                if content:
-                    yield "content", content, None
+            content = delta.content
+            if enable_thinking:
+                reasoning_content = getattr(delta, "reasoning_content", None)
+                if not reasoning_content and hasattr(delta, "model_extra") and delta.model_extra:
+                    reasoning_content = delta.model_extra.get("reasoning_content")
+                if reasoning_content:
+                    yield "reasoning", reasoning_content, None
 
-        # 最后 yield 结束信号（携带 usage）
+            if content:
+                yield "content", content, None
+
         _log_ai_call(
             action="chat_stream",
             model=target_model,
             elapsed_ms=int((time.perf_counter() - start) * 1000),
             ok=True,
-            extra={
-                "total_tokens": (usage_info or {}).get("total_tokens", 0),
-            },
+            extra={"total_tokens": (usage_info or {}).get("total_tokens", 0)},
         )
         yield "done", "", usage_info
-
-    except APITimeoutError as e:
-        _log_ai_call(
-            action="chat_stream",
-            model=model_id if model_id else settings.chat_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "timeout"},
-        )
-        logger.error(f"模型调用超时: {e}", exc_info=True)
-        raise LLMServiceError("模型调用超时")
-    except NotFoundError as e:
-        _log_ai_call(
+    except APITimeoutError as exc:
+        _raise_llm_service_error(
             action="chat_stream",
             model=target_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "not_found"},
+            start=start,
+            error_code="timeout",
+            user_message="AI 服务响应超时，请稍后重试",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("该模型不支持或模型不存在")
-    except APIError as e:
-        _log_ai_call(
+    except NotFoundError as exc:
+        _raise_llm_service_error(
             action="chat_stream",
-            model=model_id if model_id else settings.chat_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "api"},
+            model=target_model,
+            start=start,
+            error_code="model_not_found",
+            user_message="AI 模型暂时不可用",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("模型调用失败：服务异常或配置错误")
-
-
-# 离线分析（严格 JSON 输出）
+    except APIError as exc:
+        _raise_llm_service_error(
+            action="chat_stream",
+            model=target_model,
+            start=start,
+            error_code="provider_error",
+            user_message="AI 服务暂时不可用，请稍后重试",
+            exc=exc,
+        )
 
 
 async def analyze(questions_text: str) -> dict:
-    """
-    离线分析：根据问答记录生成固化结构的学习行为分析。
-
-    输入为拼接好的问答文本（调用方负责分段压缩），
-    返回包含 analysis_text 和 analysis_json 的字典。
-
-    Args:
-        questions_text: 拼接好的本段问答记录文本
-
-    Returns:
-        {
-            "analysis_text": str,
-            "analysis_json": {"initiative": ..., "depth": ..., "topic": ...},
-            "model": str,
-            "total_tokens": int,
-        }
-
-    Raises:
-        LLMServiceError: 调用失败、超时或返回非法 JSON
-    """
     start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
@@ -372,58 +299,51 @@ async def analyze(questions_text: str) -> dict:
             ok=True,
             extra={"total_tokens": response.usage.total_tokens if response.usage else 0},
         )
-
         return {
             "analysis_text": result.get("analysis_text", ""),
             "analysis_json": result.get("analysis_json", {}),
             "model": settings.analysis_model,
             "total_tokens": response.usage.total_tokens if response.usage else 0,
         }
+    except APITimeoutError as exc:
+        _raise_llm_service_error(
+            action="analyze",
+            model=settings.analysis_model,
+            start=start,
+            error_code="timeout",
+            user_message="AI 服务响应超时，请稍后重试",
+            exc=exc,
+        )
+    except NotFoundError as exc:
+        _raise_llm_service_error(
+            action="analyze",
+            model=settings.analysis_model,
+            start=start,
+            error_code="model_not_found",
+            user_message="AI 模型暂时不可用",
+            exc=exc,
+        )
+    except APIError as exc:
+        _raise_llm_service_error(
+            action="analyze",
+            model=settings.analysis_model,
+            start=start,
+            error_code="provider_error",
+            user_message="AI 服务暂时不可用，请稍后重试",
+            exc=exc,
+        )
+    except json.JSONDecodeError as exc:
+        _raise_llm_service_error(
+            action="analyze",
+            model=settings.analysis_model,
+            start=start,
+            error_code="invalid_json",
+            user_message="AI 服务返回异常，请稍后重试",
+            exc=exc,
+        )
 
-    except APITimeoutError as e:
-        _log_ai_call(
-            action="analyze",
-            model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "timeout"},
-        )
-        logger.error(f"模型调用超时: {e}", exc_info=True)
-        raise LLMServiceError("模型调用超时")
-    except NotFoundError as e:
-        _log_ai_call(
-            action="analyze",
-            model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "not_found"},
-        )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("该模型不支持或模型不存在")
-    except (APIError, json.JSONDecodeError) as e:
-        _log_ai_call(
-            action="analyze",
-            model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "api_or_json"},
-        )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("模型调用失败：服务异常或配置错误")
 
 async def summarize_report(daily_summaries: str) -> dict:
-    """
-    教师端：汇总多天的 daily_analysis_text，生成完整学习报告。
-
-    Args:
-        daily_summaries: 拼接好的多天分析文本（调用方负责限制 ≤30 天）
-
-    Returns:
-        包含 report_text, profile, total_score 等字段的字典
-
-    Raises:
-        LLMServiceError: 调用失败、超时或解析失败
-    """
     start = time.perf_counter()
     try:
         response = await _client.chat.completions.create(
@@ -442,34 +362,39 @@ async def summarize_report(daily_summaries: str) -> dict:
             extra={"total_tokens": response.usage.total_tokens if response.usage else 0},
         )
         return result
-
-    except APITimeoutError as e:
-        _log_ai_call(
+    except APITimeoutError as exc:
+        _raise_llm_service_error(
             action="summarize_report",
             model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "timeout"},
+            start=start,
+            error_code="timeout",
+            user_message="AI 服务响应超时，请稍后重试",
+            exc=exc,
         )
-        logger.error(f"模型调用超时: {e}", exc_info=True)
-        raise LLMServiceError("模型调用超时")
-    except NotFoundError as e:
-        _log_ai_call(
+    except NotFoundError as exc:
+        _raise_llm_service_error(
             action="summarize_report",
             model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "not_found"},
+            start=start,
+            error_code="model_not_found",
+            user_message="AI 模型暂时不可用",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("该模型不支持或模型不存在")
-    except (APIError, json.JSONDecodeError) as e:
-        _log_ai_call(
+    except APIError as exc:
+        _raise_llm_service_error(
             action="summarize_report",
             model=settings.analysis_model,
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            extra={"error": "api_or_json"},
+            start=start,
+            error_code="provider_error",
+            user_message="AI 服务暂时不可用，请稍后重试",
+            exc=exc,
         )
-        logger.error(f"模型调用失败: {e}", exc_info=True)
-        raise LLMServiceError("模型调用失败：服务异常或配置错误")
+    except json.JSONDecodeError as exc:
+        _raise_llm_service_error(
+            action="summarize_report",
+            model=settings.analysis_model,
+            start=start,
+            error_code="invalid_json",
+            user_message="AI 服务返回异常，请稍后重试",
+            exc=exc,
+        )

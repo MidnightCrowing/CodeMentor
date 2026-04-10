@@ -30,4 +30,4 @@ def verify_password(password: str, stored: str) -> bool:
     except Exception:
         return False
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), rounds)
-    return dk.hex() == digest
+    return secrets.compare_digest(dk.hex(), digest)

@@ -47,6 +47,9 @@ llm:
 app:
   # FastAPI 启动端口
   port: 8000
+  # 生产环境前端域名白名单
+  cors_origins:
+    - "https://codementor.example.com"
   # 聊天防刷接口限流配置（默认 1 分钟 15 次，基于 IP 封锁）
   rate_limit_chat: "15/minute"
   # 发给大模型的上下文条目限制（包含一问一答，取前N条提问）

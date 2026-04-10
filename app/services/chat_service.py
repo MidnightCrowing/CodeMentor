@@ -1,32 +1,46 @@
+from __future__ import annotations
+
 import asyncio
-import json
+import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.models import Question, Session
-from app.models.models import Question, Session, ModelUsageStat
-from sqlalchemy.dialects.postgresql import insert
-import time
-from datetime import datetime, timezone
-
+from app.models.models import ModelUsageStat, Question, Session
 from app.services import llm_service
+from app.services.llm_service import LLMServiceError
 from app.utils.sse_utils import format_sse as _sse
 from app.utils.text_utils import remove_think_tags
-from app.services.llm_service import LLMServiceError
+
+logger = logging.getLogger(__name__)
 
 
-# 固定拒答提示
 NON_PROGRAMMING_ANSWER = (
-    "抱歉，我是专门解答编程和技术问题的助教，无法回答非编程类的问题。"
-    "请提问与代码、算法或软件开发相关的内容"
+    "抱歉，我是专门解答编程和技术问题的助教，暂时无法回答非编程类问题。"
+    "请尽量提问与代码、算法、软件开发或调试相关的内容。"
 )
 
 
-# 核心流式生成器
+def _chat_log_context(
+    *,
+    user_id: str,
+    session_id: str | None,
+    dialog_id: uuid.UUID | None,
+    model_id: str | None,
+    message: str,
+) -> str:
+    return (
+        f"用户ID={user_id} 会话ID={session_id or '新会话'} 对话ID={dialog_id or '无'} "
+        f"模型={model_id or settings.chat_model} 提问长度={len(message)}"
+    )
+
+
 async def chat_stream_generator(
     user_id: str,
     session_id: str | None,
@@ -36,37 +50,40 @@ async def chat_stream_generator(
     model_id: str | None,
     db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
-    """
-    聊天流式响应的完整编排生成器。
-
-    供 FastAPI 路由 StreamingResponse 使用。
-    生成器结束时，问答记录已写入数据库。
-
-    Args:
-        user_id:    用户 ID
-        session_id: 会话 ID
-        message:    学生的提问内容
-        db:         AsyncSession（由路由层依赖注入传入）
-
-    Yields:
-        SSE 格式化字符串（标准 JSON SSE）
-
-    Raises 不会向外传播异常，所有错误均以 SSE error 事件返回。
-    """
-
-    # Step 1: 会话和历史记录处理
-    # ======================================================
     target_session_id = session_id
-    history = []
+    history: list[dict] = []
     title_task = None
 
+    async def _get_owned_session() -> Session | None:
+        if not target_session_id:
+            return None
+        stmt_session = select(Session).where(
+            Session.id == target_session_id,
+            Session.user_id == user_id,
+        )
+        result_sess = await db.execute(stmt_session)
+        return result_sess.scalars().first()
+
     from sqlalchemy import update
+
     if dialog_id and target_session_id:
-        target_q = await db.scalar(select(Question).where(Question.id == dialog_id, Question.session_id == target_session_id))
+        existing_session = await _get_owned_session()
+        if not existing_session:
+            yield _sse("error", message="会话不存在或无权访问")
+            return
+
+        target_q = await db.scalar(
+            select(Question).where(
+                Question.id == dialog_id,
+                Question.session_id == target_session_id,
+                Question.user_id == user_id,
+            )
+        )
         if target_q:
             stmt_del = (
                 update(Question)
                 .where(Question.session_id == target_session_id)
+                .where(Question.user_id == user_id)
                 .where(Question.created_at >= target_q.created_at)
                 .values(is_deleted=True)
             )
@@ -74,58 +91,63 @@ async def chat_stream_generator(
             await db.flush()
 
     if not target_session_id:
-        # 新建会话
         target_session_id = str(uuid.uuid4())
         new_session = Session(id=target_session_id, user_id=user_id)
         db.add(new_session)
         await db.flush()
-        # 后台生成标题
         title_task = asyncio.create_task(llm_service.generate_session_title(message))
     else:
-        # 校验会话
-        stmt_session = select(Session).where(Session.id == target_session_id)
-        result_sess = await db.execute(stmt_session)
-        existing_session = result_sess.scalars().first()
+        existing_session = await _get_owned_session()
         if not existing_session:
-            yield _sse("error", message=f"会话不存在或已失效: {target_session_id}")
+            yield _sse("error", message="会话不存在或无权访问")
             return
 
-        # 加载历史
         stmt_history = (
             select(Question)
             .where(Question.session_id == target_session_id)
+            .where(Question.user_id == user_id)
             .where(Question.is_deleted == False)
             .order_by(Question.created_at.desc())
             .limit(settings.context_message_limit)
         )
         result_hist = await db.execute(stmt_history)
         questions = result_hist.scalars().all()
-        # 按时间顺序（旧 -> 新）组装
         for q in reversed(questions):
             history.append({"role": "user", "content": q.question})
             history.append({"role": "assistant", "content": remove_think_tags(q.answer)})
-    # ======================================================
 
-    # Step 2: 前置分类
     try:
         is_programming = await llm_service.classify(message)
-    except LLMServiceError as e:
-        yield _sse("error", message=str(e))
+    except LLMServiceError as exc:
+        logger.warning(
+            "问题分类失败: %s 错误=%s",
+            _chat_log_context(
+                user_id=user_id,
+                session_id=target_session_id,
+                dialog_id=dialog_id,
+                model_id=model_id,
+                message=message,
+            ),
+            exc,
+        )
+        yield _sse("error", message=str(exc))
         return
 
-    # Step 3: 非编程问题 → 直接返回固定拒答
     if not is_programming:
         if title_task:
             session_title = await title_task
-            db_sess = await db.scalar(select(Session).where(Session.id == target_session_id))
+            db_sess = await db.scalar(
+                select(Session).where(
+                    Session.id == target_session_id,
+                    Session.user_id == user_id,
+                )
+            )
             if db_sess:
                 db_sess.title = session_title
                 await db.flush()
             yield _sse("session_meta", session_id=target_session_id, title=session_title)
 
         yield _sse("content", data=NON_PROGRAMMING_ANSWER)
-
-        # 将记录写入数据库（is_programming=False），此时 target_session_id 必定有效
         saved_record = await _save_question(
             db=db,
             user_id=user_id,
@@ -138,14 +160,13 @@ async def chat_stream_generator(
         )
         yield _sse("done", dialog_id=str(saved_record.id))
         return
-    # Step 3: 编程问题 → 流式回答
+
     full_answer_parts: list[str] = []
     reasoning_parts: list[str] = []
     usage_info: dict | None = None
     chat_start_time = time.perf_counter()
 
     try:
-        session_title = None
         title_sent = False
 
         async for chunk_type, chunk_data, usage in llm_service.chat_stream(
@@ -154,10 +175,12 @@ async def chat_stream_generator(
             enable_thinking=enable_thinking,
             model_id=model_id,
         ):
-            # 【新增逻辑】：一旦标题生成完成，立即在这发一条独立的 SSE，提前抛出
             if title_task and not title_sent and title_task.done():
                 session_title = title_task.result()
-                stmt_update = select(Session).where(Session.id == target_session_id)
+                stmt_update = select(Session).where(
+                    Session.id == target_session_id,
+                    Session.user_id == user_id,
+                )
                 res_upd = await db.execute(stmt_update)
                 db_sess = res_upd.scalars().first()
                 if db_sess:
@@ -173,22 +196,21 @@ async def chat_stream_generator(
                 reasoning_parts.append(chunk_data)
                 yield _sse("reasoning", data=chunk_data)
             elif chunk_type == "done" and usage:
-                # 最后一块，携带 usage 信息
                 usage_info = usage
 
-        # 【兜底】：如果聊天非常简短，循环结束前标题任务仍未出结果，此处等它执行完并发出
         if title_task and not title_sent:
             session_title = await title_task
-            stmt_update = select(Session).where(Session.id == target_session_id)
+            stmt_update = select(Session).where(
+                Session.id == target_session_id,
+                Session.user_id == user_id,
+            )
             res_upd = await db.execute(stmt_update)
             db_sess = res_upd.scalars().first()
             if db_sess:
                 db_sess.title = session_title
                 await db.flush()
             yield _sse("session_meta", session_id=target_session_id, title=session_title)
-            title_sent = True
 
-        # done 前落库
         answer_text = "".join(full_answer_parts)
         if reasoning_parts:
             reasoning_text = "".join(reasoning_parts)
@@ -222,11 +244,23 @@ async def chat_stream_generator(
 
         yield _sse("done", dialog_id=str(saved_record.id))
 
-    except LLMServiceError as e:
-        yield _sse("error", message=str(e))
-        # 记录失败指标（即使没有任何输出也要计入 error_count）
+    except LLMServiceError as exc:
         chat_latency_ms = int((time.perf_counter() - chat_start_time) * 1000)
         actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
+        logger.warning(
+            "聊天流式调用失败: %s 实际模型=%s 延迟毫秒=%s 错误=%s",
+            _chat_log_context(
+                user_id=user_id,
+                session_id=target_session_id,
+                dialog_id=dialog_id,
+                model_id=model_id,
+                message=message,
+            ),
+            actual_model,
+            chat_latency_ms,
+            exc,
+        )
+        yield _sse("error", message=str(exc))
         await _upsert_model_usage(
             db=db,
             user_id=user_id,
@@ -238,7 +272,6 @@ async def chat_stream_generator(
             is_error=True,
         )
 
-        # 流中断，仍尝试保存已收到的部分（如有）
         if not full_answer_parts and not reasoning_parts:
             return
 
@@ -248,7 +281,7 @@ async def chat_stream_generator(
             full_answer = f"<think>\n{reasoning_text}\n</think>\n\n{answer_text}"
         else:
             full_answer = answer_text
-            
+
         await _save_question(
             db=db,
             user_id=user_id,
@@ -259,30 +292,39 @@ async def chat_stream_generator(
             model=usage_info.get("model") if usage_info else None,
             tokens=usage_info.get("total_tokens") if usage_info else None,
         )
-        
+
     except asyncio.CancelledError:
-        # 客户端（前端）主动断开连接 / 点击了停止生成
-        # 我们依然需要把已经生成的半截内容落库，并记录 Token 消耗
+        actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
+        logger.info(
+            "聊天请求被取消: %s 实际模型=%s",
+            _chat_log_context(
+                user_id=user_id,
+                session_id=target_session_id,
+                dialog_id=dialog_id,
+                model_id=model_id,
+                message=message,
+            ),
+            actual_model,
+        )
         answer_text = "".join(full_answer_parts)
         if reasoning_parts:
             reasoning_text = "".join(reasoning_parts)
             full_answer = f"<think>\n{reasoning_text}\n</think>\n\n{answer_text}"
         else:
             full_answer = answer_text
-            
+
         await _save_question(
             db=db,
             user_id=user_id,
             session_id=target_session_id,
             question=message,
-            answer=full_answer + "\n\n[回答被用户中断]",
+            answer=full_answer + "\n\n[回答已被用户中断]",
             is_programming=True,
             model=usage_info.get("model") if usage_info else None,
             tokens=usage_info.get("total_tokens") if usage_info else None,
         )
-        
+
         chat_latency_ms = int((time.perf_counter() - chat_start_time) * 1000)
-        actual_model = usage_info.get("model") if usage_info else (model_id or settings.chat_model)
         await _upsert_model_usage(
             db=db,
             user_id=user_id,
@@ -293,8 +335,7 @@ async def chat_stream_generator(
             latency_ms=chat_latency_ms,
             is_error=False,
         )
-        raise  # 必须重新抛出 CancelledError 遵守 asyncio 的底线规范
-
+        raise
 
 
 async def _upsert_model_usage(
@@ -307,7 +348,6 @@ async def _upsert_model_usage(
     latency_ms: int,
     is_error: bool,
 ):
-    """通过 PostgreSQL 无冲突高并发更新"""
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     stmt = insert(ModelUsageStat).values(
         date=date_str,
@@ -329,12 +369,12 @@ async def _upsert_model_usage(
             "total_tokens": ModelUsageStat.total_tokens + total_tokens,
             "total_latency_ms": ModelUsageStat.total_latency_ms + latency_ms,
             "error_count": ModelUsageStat.error_count + (1 if is_error else 0),
-        }
+        },
     )
     await db.execute(stmt)
     await db.flush()
 
-# 数据库写入（私有）
+
 async def _save_question(
     db: AsyncSession,
     user_id: str,
@@ -345,22 +385,6 @@ async def _save_question(
     model: str | None,
     tokens: int | None,
 ) -> Question:
-    """
-    将一条问答记录持久化到 questions 表。
-
-    Args:
-        db:             数据库会话
-        user_id:        学生 ID
-        session_id:     会话 ID
-        question:       学生提问
-        answer:         AI 回答（或固定拒答文本）
-        is_programming: 分类结果
-        model:          使用的模型 ID（可能为 None）
-        tokens:         消耗的 token 数（可能为 None）
-
-    Returns:
-        已落库的 Question 对象
-    """
     record = Question(
         user_id=user_id,
         session_id=session_id,
@@ -371,5 +395,5 @@ async def _save_question(
         tokens=tokens,
     )
     db.add(record)
-    await db.flush()  # 让 ORM 分配 id，commit 由依赖注入的会话生命周期统一处理
+    await db.flush()
     return record

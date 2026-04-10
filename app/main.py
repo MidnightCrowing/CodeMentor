@@ -1,26 +1,24 @@
+import json
 import logging
-import asyncio
 from contextlib import asynccontextmanager
 
-from slowapi.errors import RateLimitExceeded
-from app.core.limiter import limiter
-
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from sqlalchemy import select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.schemas.base import BaseResponse
-
 from app.api.v1.router import router as v1_router
-from app.scheduler.daily_task import start_scheduler, stop_scheduler
-from app.core.logger import setup_logging
-from app.core.startup import sync_models_to_db
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.limiter import limiter
+from app.core.logger import setup_logging
 from app.core.request_context import set_user_role
+from app.core.startup import sync_models_to_db
 from app.models.models import User
-from sqlalchemy import select
+from app.scheduler.daily_task import start_scheduler, stop_scheduler
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -44,10 +42,62 @@ def _extract_user_id(request: Request) -> str | None:
     return None
 
 
+def _extract_model_from_request(request: Request) -> str | None:
+    state_model = getattr(request.state, "model_id", None)
+    if state_model:
+        return str(state_model)
+
+    query_model = request.query_params.get("model_id")
+    if query_model:
+        return query_model
+
+    raw_body = getattr(request.state, "raw_body", b"")
+    if not raw_body:
+        return None
+
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    model_id = body.get("model_id")
+    if model_id is None:
+        return None
+    return str(model_id)
+
+
+def _request_log_context(request: Request) -> dict[str, str]:
+    user_id = getattr(request.state, "request_user_id", None) or _extract_user_id(request)
+    client_ip = request.client.host if request.client else "unknown"
+    return {
+        "method": request.method,
+        "path": request.url.path,
+        "user_id": user_id or "匿名",
+        "model": _extract_model_from_request(request) or "未提供",
+        "client_ip": client_ip,
+    }
+
+
+def _format_request_context(request: Request) -> str:
+    ctx = _request_log_context(request)
+    return (
+        f"方法={ctx['method']} 路径={ctx['path']} 用户ID={ctx['user_id']} "
+        f"模型={ctx['model']} 客户端IP={ctx['client_ip']}"
+    )
+
+
 async def attach_user_role(request: Request, call_next):
     try:
+        request.state.request_user_id = _extract_user_id(request)
+        request.state.raw_body = await request.body()
+
+        async def receive():
+            return {"type": "http.request", "body": request.state.raw_body, "more_body": False}
+
+        request._receive = receive
+
         if request.url.path.startswith("/api/v1/chat"):
-            user_id = _extract_user_id(request)
+            user_id = request.state.request_user_id
             if user_id:
                 try:
                     async with AsyncSessionLocal() as db:
@@ -57,104 +107,98 @@ async def attach_user_role(request: Request, call_next):
                             request.state.user_role = user.role
                             set_user_role(user.role)
                 except Exception:
-                    # If lookup fails, fall back to normal rate limiting.
-                    pass
+                    logger.warning("挂载用户角色失败: %s", _format_request_context(request), exc_info=True)
         response = await call_next(request)
         return response
     finally:
-        # Clear request-scoped role to avoid leaking across requests.
         set_user_role(None)
 
 
-# 生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    管理 FastAPI 启动和关闭流程。
-    在 startup 中启动 APScheduler，在 shutdown 时安全关闭。
-    """
-    logger.info("应用启动中...")
+    logger.info("应用启动中")
     await sync_models_to_db()
     from app.services import report_export_service
+
     await report_export_service.reset_stale_jobs()
     start_scheduler()
     yield
-    logger.info("应用关闭中...")
+    logger.info("应用关闭中")
     await stop_scheduler()
 
 
-# FastAPI 实例
 app = FastAPI(
-    title="CodeMentor - AI 学习行为分析系统",
-    description="与学生进行代码问答，并持续收集和分析学习行为数据。",
+    title="CodeMentor - AI Learning Behavior Analysis System",
+    description="CodeMentor backend API for chat, analytics, and report export.",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# 全局挂载 limiter
 app.middleware("http")(attach_user_role)
 app.state.limiter = limiter
 
-# 配置 CORS 跨域请求（支持前后端分离集成）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 默认允许全部，建议在生产中通过环境变量限制
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-
-# 全局 HTTP 异常处理（返回统一信封格式）
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    """防刷限流器拦截。"""
-    client_ip = request.client.host if request.client else "Unknown"
-    logger.warning(f"触发反爬阈值: {client_ip} 遭到拦截")
+    logger.warning("触发限流: %s", _format_request_context(request))
     return JSONResponse(
         status_code=429,
         content={"code": 1, "message": "请求过于频繁，请稍后再试", "data": None},
     )
 
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """拦截 FastAPI 默认的 422 校验错误，转换为统一格式。"""
-    err_msg = "参数校验错误"
+    err_msg = "请求参数错误"
     if exc.errors():
         err = exc.errors()[0]
-        # 去掉默认的 query/body 等前缀，只保留字段名
-        field = ".".join(str(x) for x in err.get("loc", []) if x not in ("query", "body", "path"))
-        msg = err.get("msg", "")
-        # FIX: 将前面的判断漏掉 field 的问题补齐
-        err_msg = f"参数错误: {field} {msg}" if field else f"参数错误: {msg}"
-        
-    logger.warning(f"参数校验失败: {exc.errors()}")
+        field = ".".join(
+            str(x) for x in err.get("loc", []) if x not in ("query", "body", "path")
+        )
+        err_msg = f"参数错误: {field}" if field else "请求参数错误"
+
+    logger.warning(
+        "请求参数校验失败: %s 错误详情=%s",
+        _format_request_context(request),
+        exc.errors(),
+    )
     return JSONResponse(
-        status_code=400,  # 也可以保持 422，但对前端来说 400 更通用
+        status_code=400,
         content={"code": 1, "message": err_msg, "data": None},
     )
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """捕获所有未处理的异常，返回统一的错误信封格式。"""
-    logger.error(f"未捕获异常：{exc}", exc_info=True)
+    logger.error("未处理异常: %s 异常=%s", _format_request_context(request), exc, exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"code": 1, "message": "服务内部错误，请稍后重试", "data": None},
+        content={"code": 1, "message": "请求处理失败，请稍后重试", "data": None},
     )
 
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """拦截 FastAPI 中抛出的 HTTPException，转换为统一错误格式。"""
-    logger.warning(f"HTTP 异常: {exc.detail}")
+    level = logging.INFO if exc.status_code in {401, 403, 404} else logging.WARNING
+    logger.log(
+        level,
+        "HTTP异常: %s 状态码=%s 详情=%s",
+        _format_request_context(request),
+        exc.status_code,
+        exc.detail,
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": 1, "message": str(exc.detail), "data": None},
     )
 
 
-# 挂载路由
 app.include_router(v1_router)
