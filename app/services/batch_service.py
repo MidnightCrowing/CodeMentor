@@ -1,7 +1,5 @@
 """
-services/batch_service.py
-=========================
-批量推理服务封装（用于离线分析任务）。
+批量推理服务封装，用于离线分析任务。
 """
 
 from __future__ import annotations
@@ -11,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI, APITimeoutError, APIError
+from openai import APIError, APITimeoutError, AsyncOpenAI
 
 from app.core.config import settings
 
@@ -27,7 +25,7 @@ def _log_batch_call(action: str, elapsed_ms: int, ok: bool, extra: dict | None =
     }
     if extra:
         payload.update(extra)
-    ai_logger.info(f"AI_BATCH_CALL {payload}")
+    ai_logger.info("AI_BATCH_CALL %s", payload)
 
 
 def _get_id(obj: Any) -> str | None:
@@ -42,7 +40,7 @@ def _get_id(obj: Any) -> str | None:
 
 def _ensure_client() -> AsyncOpenAI:
     if not settings.batch_api_key:
-        raise ValueError("BATCH_API_KEY 未配置")
+        raise ValueError("未配置 BATCH_API_KEY")
     return AsyncOpenAI(
         api_key=settings.batch_api_key,
         base_url=settings.llm_base_url,
@@ -51,9 +49,7 @@ def _ensure_client() -> AsyncOpenAI:
 
 
 async def upload_batch_input(file_path: Path) -> str:
-    """
-    上传 batch 输入文件，返回 file_id。
-    """
+    """上传 batch 输入文件，返回 `file_id`。"""
     client = _ensure_client()
     start = time.perf_counter()
     try:
@@ -64,9 +60,14 @@ async def upload_batch_input(file_path: Path) -> str:
             raise RuntimeError("上传 batch 输入文件失败：未返回 file_id")
         _log_batch_call("upload_input", int((time.perf_counter() - start) * 1000), True)
         return file_id
-    except (APITimeoutError, APIError) as e:
-        _log_batch_call("upload_input", int((time.perf_counter() - start) * 1000), False, {"error": "api"})
-        logger.error(f"Batch 输入文件上传失败: {e}", exc_info=True)
+    except (APITimeoutError, APIError) as exc:
+        _log_batch_call(
+            "upload_input",
+            int((time.perf_counter() - start) * 1000),
+            False,
+            {"error": "api"},
+        )
+        logger.error("Batch 输入文件上传失败: %s", exc, exc_info=True)
         raise
 
 
@@ -76,9 +77,7 @@ async def create_batch(
     completion_window: str = "24h",
     metadata: dict | None = None,
 ) -> dict:
-    """
-    创建 batch 任务，返回 batch 对象。
-    """
+    """创建 batch 任务，返回 batch 对象。"""
     client = _ensure_client()
     start = time.perf_counter()
     try:
@@ -95,15 +94,17 @@ async def create_batch(
             True,
             {"model": model},
         )
+        batch_id = _get_id(batch)
+        logger.info("Batch 创建成功: batch_id=%s 模型=%s", batch_id, model)
         return batch if isinstance(batch, dict) else batch.model_dump()
-    except (APITimeoutError, APIError) as e:
+    except (APITimeoutError, APIError) as exc:
         _log_batch_call(
             "create_batch",
             int((time.perf_counter() - start) * 1000),
             False,
             {"error": "api", "model": model},
         )
-        logger.error(f"Batch 创建失败: {e}", exc_info=True)
+        logger.error("Batch 创建失败: 模型=%s 错误=%s", model, exc, exc_info=True)
         raise
 
 
@@ -114,9 +115,14 @@ async def retrieve_batch(batch_id: str) -> dict:
         batch = await client.batches.retrieve(batch_id)
         _log_batch_call("retrieve_batch", int((time.perf_counter() - start) * 1000), True)
         return batch if isinstance(batch, dict) else batch.model_dump()
-    except (APITimeoutError, APIError) as e:
-        _log_batch_call("retrieve_batch", int((time.perf_counter() - start) * 1000), False, {"error": "api"})
-        logger.error(f"Batch 状态获取失败: {e}", exc_info=True)
+    except (APITimeoutError, APIError) as exc:
+        _log_batch_call(
+            "retrieve_batch",
+            int((time.perf_counter() - start) * 1000),
+            False,
+            {"error": "api"},
+        )
+        logger.error("Batch 状态获取失败: batch_id=%s 错误=%s", batch_id, exc, exc_info=True)
         raise
 
 
@@ -134,8 +140,13 @@ async def download_file_content(file_id: str) -> bytes:
         if hasattr(content, "content"):
             _log_batch_call("download_file", int((time.perf_counter() - start) * 1000), True)
             return content.content  # type: ignore[return-value]
-        raise RuntimeError("无法解析文件内容")
-    except (APITimeoutError, APIError) as e:
-        _log_batch_call("download_file", int((time.perf_counter() - start) * 1000), False, {"error": "api"})
-        logger.error(f"Batch 文件下载失败: {e}", exc_info=True)
+        raise RuntimeError("无法解析下载文件内容")
+    except (APITimeoutError, APIError) as exc:
+        _log_batch_call(
+            "download_file",
+            int((time.perf_counter() - start) * 1000),
+            False,
+            {"error": "api"},
+        )
+        logger.error("Batch 文件下载失败: file_id=%s 错误=%s", file_id, exc, exc_info=True)
         raise

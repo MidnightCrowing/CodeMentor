@@ -39,6 +39,17 @@ from app.services.llm_service import LLMServiceError
 router = APIRouter()
 
 
+async def _get_owned_export_job(
+    db: AsyncSession,
+    current_user_id: str,
+    job_id: str,
+) -> SummaryReportExportJob | None:
+    job = await db.get(SummaryReportExportJob, job_id)
+    if not job or job.user_id != current_user_id:
+        return None
+    return job
+
+
 @router.get("/analysis/daily", response_model=BaseResponse[list[DailyAnalysisSummaryOut]])
 async def get_daily_analysis(
     target_user_id: str = Query(..., description="Target student user id"),
@@ -94,9 +105,9 @@ async def generate_report(
             return BaseResponse.ok(ReportOut.model_validate(report.report_json))
         return BaseResponse.ok(ReportOut(report_text=report.report_text))
     except ValueError:
-        return BaseResponse.error("No analysis data in date range")
-    except LLMServiceError:
-        return BaseResponse.error("Model call failed")
+        return BaseResponse.error("指定时间范围内暂无分析数据")
+    except LLMServiceError as exc:
+        return BaseResponse.error(str(exc))
 
 
 @router.get("/analysis/classes", response_model=BaseResponse[list[ClassCodeOut]])
@@ -161,13 +172,11 @@ async def delete_export_job(
     Running jobs cannot be deleted.
     """
     await check_user_permission(current_user_id, db, "teacher")
-    job = await db.get(SummaryReportExportJob, job_id)
+    job = await _get_owned_export_job(db, current_user_id, job_id)
     if not job:
-        return BaseResponse.error("Job not found")
-    if job.user_id != current_user_id:
-        return BaseResponse.error("No permission")
+        return BaseResponse.error("任务不存在")
     if job.status == "running":
-        return BaseResponse.error("Cannot delete a job that is still running")
+        return BaseResponse.error("任务执行中，暂时无法删除")
 
     # 删除磁盘文件（如有）
     if job.result_path and os.path.exists(job.result_path):
@@ -233,9 +242,9 @@ async def get_export_job_status(
     Get export job status.
     """
     await check_user_permission(current_user_id, db, "teacher")
-    job = await db.get(SummaryReportExportJob, job_id)
+    job = await _get_owned_export_job(db, current_user_id, job_id)
     if not job:
-        return BaseResponse.error("Job not found")
+        return BaseResponse.error("任务不存在")
 
     total = job.total_count or 0
     completed = job.completed_count or 0
@@ -268,11 +277,11 @@ async def download_export_result(
     Download export result file.
     """
     await check_user_permission(current_user_id, db, "teacher")
-    job = await db.get(SummaryReportExportJob, job_id)
+    job = await _get_owned_export_job(db, current_user_id, job_id)
     if not job or not job.result_path:
-        return BaseResponse.error("Result not ready")
+        return BaseResponse.error("结果尚未生成")
     if not os.path.exists(job.result_path):
-        return BaseResponse.error("Result file missing")
+        return BaseResponse.error("结果文件不存在")
     return FileResponse(
         path=job.result_path,
         filename=os.path.basename(job.result_path),
@@ -419,12 +428,24 @@ async def run_daily_for_user(
     """
     await check_user_permission(current_user_id, db, "admin")
     await require_user(body.target_user_id, db)
+    target_date = body.date or date.today().isoformat()
 
     result = await analysis_service.run_daily_analysis_for_user(
         db=db,
         user_id=body.target_user_id,
-        date_str=body.date,
+        date_str=target_date,
     )
+    if not result.get("processed"):
+        return BaseResponse.ok(
+            {
+                **result,
+                "date": target_date,
+                "analysis_text": None,
+                "analysis_json": None,
+                "created_at": None,
+            }
+        )
+
     analysis = await analysis_service.get_daily_analysis_by_date(
         db=db,
         user_id=body.target_user_id,

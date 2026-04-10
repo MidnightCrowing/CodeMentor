@@ -1,5 +1,5 @@
 # 第一阶段：编译环境 (可选但建议，这里采用单阶段简易化)
-FROM python:3.13-slim
+FROM python:3.13-slim-bookworm
 
 # 设置工作目录
 WORKDIR /app
@@ -15,8 +15,16 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
-    postgresql-client \
+    ca-certificates \
+    curl \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装 PostgreSQL 官方源以获取 pg_dump 18.x
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && apt-get install -y postgresql-client-18 && \
+    rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖（配置清华、阿里、腾讯等多重备用镜像）
 COPY requirements.txt .

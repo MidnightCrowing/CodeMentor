@@ -1,20 +1,17 @@
 """
-core/limiter.py
-===============
-限流功能核心组件加载层。
+限流组件。
 
-职责：
-- 构建项目全局的防刷频率控制器（基于 slowapi）。
-- 提取用户访问 IP 用于独立封锁识别。
+- 优先使用用户身份做限流键
+- 未登录时退化为客户端 IP
 """
 
 from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-import typing
+
 
 def get_user_id_or_ip(request: Request) -> str:
-    """提取用户身份作为限流条件，如果没有则退化为 IP"""
+    """提取用户身份作为限流依据；未登录时回退到 IP。"""
     auth = request.headers.get("Authorization")
     if auth and auth.lower().startswith("bearer "):
         token = auth.split(" ", 1)[1].strip()
@@ -31,5 +28,5 @@ def get_user_id_or_ip(request: Request) -> str:
 
     return get_remote_address(request)
 
-# 创建 Limiter 实例并以用户 ID（或 IP）作为哈希唯一标识来记录频次
+
 limiter = Limiter(key_func=get_user_id_or_ip)
