@@ -20,7 +20,7 @@ def backup_database() -> str | None:
     Returns:
         备份文件路径；失败时返回 `None`。
     """
-    backup_dir = Path("database_backups")
+    backup_dir = Path(settings.backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     from app.core.config import CHINA_TZ
@@ -66,7 +66,7 @@ def backup_database() -> str | None:
 
 def cleanup_old_backups(days: int = 10) -> int:
     """清理指定天数之前的备份文件。"""
-    backup_dir = Path("database_backups")
+    backup_dir = Path(settings.backup_dir)
     if not backup_dir.exists():
         return 0
 

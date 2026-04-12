@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     log_dir: str = _yaml.get("logging", {}).get("log_dir", "./logs")
     batch_poll_minutes: int = _yaml["app"].get("batch_poll_minutes", 15)
     export_concurrency: int = _yaml["app"].get("export_concurrency", 10)
+    export_dir: str = _yaml["app"].get("export_dir", "./exports")
+    backup_dir: str = _yaml["app"].get("backup_dir", "./database_backups")
     cors_origins: list[str] = _yaml["app"].get("cors_origins", [])
 
 

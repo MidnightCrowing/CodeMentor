@@ -1,42 +1,57 @@
 # CodeMentor
 
-## 目录结构
+### 目录结构
 * `/app` - 核心业务源码及 FastAPI 原生编排逻辑
 * `/alembic` - 数据库架构迁移管理脚本
 * `/docs` - 项目的额外标准文档与 API 设计约定
 * `/logs` - 各类终端应用级日志文件系统位置
 
-## 环境与依赖安装
-本机开发推荐使用 Conda 隔离 Python 3.13 运行环境：
+### 本地开发调试
 ```bash
-# 创建并激活 Conda 环境
-conda create -n CodeMentor python=3.13 -y
-conda activate CodeMentor
-
-# 安装相关依赖包
-pip install -r requirements.txt
-```
-
-请在项目根目录下确保存在 `.env` 文件，内容中至少包含大模型必需的 API Key 以及数据库连接串：
-```env
-OPENAI_API_KEY=your_api_key_here
-DATABASE_URL=postgresql+asyncpg://user:password@localhost/codementor_db
-```
-
-## 常用命令
-
-### 1. 开发启动环境
-启用内建服务器并带有代码热重载支持：
-```bash
+# 启动热重载开发服务器
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# [数据库表结构变更时] 自动比对 models.py 生成迁移文件
+alembic revision --autogenerate -m "新增了xx字段"
+
+# [数据库表结构变更时] 让数据库应用上述的变更
+alembic upgrade head
 ```
 
-### 2. 数据库迁移方案 (Alembic)
-此项目涉及 SQLAlchemy 表结构的不断演进。如更新 `models.py`，请执行以下指令应用架构修改至数据库之中：
+### 生产环境 Docker 管理
 ```bash
-# 自动比对结构并生成迁移版本
-alembic revision --autogenerate -m "描述您这次变更的内容"
+# 启动所有服务
+docker compose up -d
 
-# 将迁移挂载到远端以正式完成更新
-alembic upgrade head
+# 停止服务（不删除）
+docker compose stop
+
+# 启动已停止服务
+docker compose start
+
+# 重启服务
+docker compose restart
+
+# 停止并删除容器（不删数据卷）
+docker compose down
+
+# 重建镜像并启动
+docker compose up -d --build
+
+# 查看日志
+docker compose logs -f
+
+# 查看状态
+docker compose ps
+```
+
+### 数据库安全与运维
+*(注：首次在 linux 运行需赋权：`chmod +x scripts/*.sh`)*
+
+```bash
+# 1. 自动执行数据库全量导出 (存至 database_backups 目录)
+./scripts/backup.sh
+
+# 2. 从指定 SQL 文件恢复数据 (⚠️高危操作，将覆盖现有数据库)
+./scripts/restore.sh ./database_backups/你的SQL备份文件名.sql
 ```
