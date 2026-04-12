@@ -9,6 +9,7 @@ services:
       - ./logs:/app/logs
       - ./exports:/app/exports
       - ./config.yaml:/app/config.yaml
+      - ./database_backups:/app/database_backups
     env_file:
       - .env
     environment:

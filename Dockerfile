@@ -37,10 +37,11 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && 
 COPY . .
 
 # 创建持久化目录
-RUN mkdir -p logs exports
+RUN mkdir -p logs exports database_backups
 
 # 暴露端口（与 config.yaml 默认端口保持一致）
 EXPOSE 8000
 
-# 启动脚本：自动执行数据库同步并启动服务
-CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 启动脚本：自动执行数据库同步并使用 Gunicorn 启动服务
+# TODO(性能调优): 当前服务器为 2 核，设为 5 个 worker (2*2+1)。未来升级 8 核请改为 17，16 核请改为 33
+CMD alembic upgrade head && gunicorn app.main:app -w 5 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000

@@ -24,7 +24,7 @@ from app.services import analysis_service
 
 logger = logging.getLogger(__name__)
 
-EXPORT_DIR = Path("exports")
+EXPORT_DIR = Path(settings.export_dir)
 
 
 def _now_local_str() -> str:
