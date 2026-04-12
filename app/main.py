@@ -18,7 +18,7 @@ from app.core.logger import setup_logging
 from app.core.request_context import set_user_role
 from app.core.startup import sync_models_to_db
 from app.models.models import User
-from app.scheduler.daily_task import start_scheduler, stop_scheduler
+from app.scheduler.daily_task import acquire_master_lock, start_scheduler, stop_scheduler
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -89,13 +89,6 @@ def _format_request_context(request: Request) -> str:
 async def attach_user_role(request: Request, call_next):
     try:
         request.state.request_user_id = _extract_user_id(request)
-        request.state.raw_body = await request.body()
-
-        async def receive():
-            return {"type": "http.request", "body": request.state.raw_body, "more_body": False}
-
-        request._receive = receive
-
         if request.url.path.startswith("/api/v1/chat"):
             user_id = request.state.request_user_id
             if user_id:
@@ -117,14 +110,22 @@ async def attach_user_role(request: Request, call_next):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("应用启动中")
-    await sync_models_to_db()
-    from app.services import report_export_service
+    
+    is_master = acquire_master_lock()
+    
+    if is_master:
+        await sync_models_to_db()
+        from app.services import report_export_service
 
-    await report_export_service.reset_stale_jobs()
-    start_scheduler()
+        await report_export_service.reset_stale_jobs()
+        start_scheduler()
+    else:
+        logger.info("[多进程] 其它 Worker 已取得全局锁，本进程继续作为纯 API 节点运行")
+        
     yield
     logger.info("应用关闭中")
-    await stop_scheduler()
+    if is_master:
+        await stop_scheduler()
 
 
 app = FastAPI(
