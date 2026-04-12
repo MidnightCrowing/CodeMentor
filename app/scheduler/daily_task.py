@@ -28,6 +28,33 @@ _daily_lock = asyncio.Lock()
 _batch_lock = asyncio.Lock()
 _export_trigger = asyncio.Event()
 
+_scheduler_lock_fd = None
+_is_master: bool | None = None
+
+def acquire_master_lock() -> bool:
+    """尝试获取文件锁，确保多进程下只有 1 个实例运行调度器和初始化流程。"""
+    global _scheduler_lock_fd, _is_master
+    if _is_master is not None:
+        return _is_master
+
+    import os
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            lock_file = open("scheduler.lock", "w")
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            _scheduler_lock_fd = lock_file
+        else:
+            import fcntl
+            lock_file = open("/tmp/scheduler.lock", "w")
+            fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _scheduler_lock_fd = lock_file
+        _is_master = True
+    except Exception:
+        _is_master = False
+        
+    return _is_master
+
 
 async def _database_backup_job() -> None:
     """凌晨 4 点执行数据库备份，并清理旧备份。"""
@@ -210,6 +237,9 @@ def start_scheduler() -> None:
     """启动调度器。"""
     if _scheduler.running:
         logger.debug("[定时任务] 调度器已在运行，跳过重复启动")
+        return
+
+    if not acquire_master_lock():
         return
 
     hour = settings.daily_analysis_hour
