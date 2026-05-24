@@ -52,6 +52,21 @@ def _build_messages(system_prompt: str, user_message: str) -> list[dict]:
     ]
 
 
+def _build_classify_messages(
+    message: str,
+    history: list[dict] | None = None,
+) -> list[dict]:
+    messages: list[dict] = [{"role": "system", "content": CLASSIFY_SYSTEM_PROMPT}]
+    if history:
+        for item in history:
+            role = item.get("role")
+            content = item.get("content")
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": message})
+    return messages
+
+
 def _log_ai_call(
     action: str,
     model: str,
@@ -115,12 +130,12 @@ def _title_fallback(reason: str, model: str, start: float, exc: Exception) -> st
     return "新会话"
 
 
-async def classify(message: str) -> bool:
+async def classify(message: str, history: list[dict] | None = None) -> bool:
     start = time.perf_counter()
     try:
         response = await _classify_client.chat.completions.create(
             model=settings.classify_model,
-            messages=_build_messages(CLASSIFY_SYSTEM_PROMPT, message),
+            messages=_build_classify_messages(message, history),
             response_format={"type": "json_object"},
             temperature=0,
         )
@@ -131,6 +146,7 @@ async def classify(message: str) -> bool:
             model=settings.classify_model,
             elapsed_ms=int((time.perf_counter() - start) * 1000),
             ok=True,
+            extra={"history_messages": len(history or [])},
         )
         return bool(result.get("is_programming", False))
     except APITimeoutError as exc:
@@ -148,7 +164,7 @@ async def classify(message: str) -> bool:
             model=settings.classify_model,
             start=start,
             error_code="model_not_found",
-            user_message="AI 模型暂时不可用",
+            user_message="该模型不支持或模型不存在",
             exc=exc,
         )
     except APIError as exc:
@@ -267,7 +283,7 @@ async def chat_stream(
             model=target_model,
             start=start,
             error_code="model_not_found",
-            user_message="AI 模型暂时不可用",
+            user_message="该模型不支持或模型不存在",
             exc=exc,
         )
     except APIError as exc:
@@ -320,7 +336,7 @@ async def analyze(questions_text: str) -> dict:
             model=settings.analysis_model,
             start=start,
             error_code="model_not_found",
-            user_message="AI 模型暂时不可用",
+            user_message="该模型不支持或模型不存在",
             exc=exc,
         )
     except APIError as exc:
@@ -377,7 +393,7 @@ async def summarize_report(daily_summaries: str) -> dict:
             model=settings.analysis_model,
             start=start,
             error_code="model_not_found",
-            user_message="AI 模型暂时不可用",
+            user_message="该模型不支持或模型不存在",
             exc=exc,
         )
     except APIError as exc:

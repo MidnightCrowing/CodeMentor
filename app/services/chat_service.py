@@ -117,7 +117,7 @@ async def chat_stream_generator(
             history.append({"role": "assistant", "content": remove_think_tags(q.answer)})
 
     try:
-        is_programming = await llm_service.classify(message)
+        is_programming = await llm_service.classify(message, history=history)
     except LLMServiceError as exc:
         logger.warning(
             "问题分类失败: %s 错误=%s",
