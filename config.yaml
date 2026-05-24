@@ -61,7 +61,7 @@ app:
   # 凌晨几点运行离线分析任务（24 小时制）
   daily_analysis_hour: 3
   # 删除多少天之前的聊天历史记录（0表示永不删除）
-  delete_history_days: 30
+  delete_history_days: 100
   # 数据库存储最大容量软阈值监控（预留预警或缩容机制依据，单位 GB）
   db_cleanup_size_gb: 80
   # Batch 任务轮询间隔（分钟）

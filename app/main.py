@@ -72,8 +72,8 @@ def _request_log_context(request: Request) -> dict[str, str]:
     return {
         "method": request.method,
         "path": request.url.path,
-        "user_id": user_id or "匿名",
-        "model": _extract_model_from_request(request) or "未提供",
+        "user_id": user_id,
+        "model": _extract_model_from_request(request),
         "client_ip": client_ip,
     }
 
