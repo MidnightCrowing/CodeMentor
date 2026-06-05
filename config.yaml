@@ -1,57 +1,71 @@
 llm:
   # 默认值的主对话模型（用于流式回答学生问题）
-  chat_model: "gpt-5-mini"
+  chat_model: auto-mini
 
   # 可选的对话模型列表
   available_models:
-    - id: "gpt-5-mini"
-      name: "GPT-5-Mini"
+    - id: auto-mini
+      name: Auto
       support_thinking: false
-    - id: "Pro/MiniMaxAI/MiniMax-M2.5"
-      name: "MiniMax-M2.5"
+    - id: gpt-5.4
+      name: GPT-5.4
       support_thinking: false
-    - id: "Pro/zai-org/GLM-5"
-      name: "GLM-5"
-      support_thinking: true
-    - id: "Pro/moonshotai/Kimi-K2.5"
-      name: "Kimi-K2.5"
+    - id: claude-opus-4-6
+      name: Claude Opus 4.6
       support_thinking: false
-    - id: "deepseek-v3.2"
-      name: "DeepSeek-V3.2 Free"
+    - id: qwen3.6-plus
+      name: Qwen 3.6 Plus
+      support_thinking: false
+    - id: deepseek-v4-flash
+      name: DeepSeek V4 Flash
+      support_thinking: false
+    - id: deepseek-v4-pro
+      name: DeepSeek V4 Pro
+      support_thinking: false
+    - id: glm-5.1
+      name: GLM 5.1
       support_thinking: true
-    - id: "Pro/deepseek-ai/DeepSeek-V3.2"
-      name: "DeepSeek-V3.2 Pro"
+    - id: MiniMax-M2.7
+      name: MiniMax M2.7
+      support_thinking: false
+    - id: LongCat-Flash-Thinking
+      name: LongCat Flash Thinking
       support_thinking: true
-    - id: "Qwen/Qwen3.5-397B-A17B"
-      name: "Qwen3.5-397B-A17B"
-      support_thinking: true
+    - id: doubao-seed-2-0-pro-260215
+      name: doubao-seed-2-0-pro
+      support_thinking: false
 
   # 轻量分类模型（用于前置判断 is_programming）
-  classify_model: "gpt-5-mini"
+  classify_model: auto-flash
 
   # 用于生成会话标题的模型
-  title_model: "gpt-5-mini"
+  title_model: auto-flash
 
   # 离线分析模型（用于每日学习行为分析）
-  analysis_model: "gpt-5-mini"
+  analysis_model: auto-mini
 
   # API 调用超时（秒）
   timeout: 30
 
   # API Base URL
-  base_url: "https://api.chatanywhere.tech/v1"
+  base_url: http://47.93.3.71:4000/v1
+
+  # 独立 Base URL（可选，不填则使用 base_url）
+  chat_base_url: null
+  classify_base_url: null
+  batch_base_url: null
 
   # Batch 推理完成窗口（如 24h / 48h）
-  batch_completion_window: "24h"
+  batch_completion_window: 24h
 
 app:
   # FastAPI 启动端口
   port: 8000
   # 生产环境前端域名白名单
   cors_origins:
-    - "https://codementor.example.com"
+    - https://codementor.example.com
   # 聊天防刷接口限流配置（默认 1 分钟 15 次，基于用户id封锁）
-  rate_limit_chat: "15/minute"
+  rate_limit_chat: 15/minute
   # 发给大模型的上下文条目限制（包含一问一答，取前N条提问）
   context_message_limit: 10
   # 每次分析压缩的对话块大小（超过此数量时分段压缩）
@@ -61,7 +75,7 @@ app:
   # 凌晨几点运行离线分析任务（24 小时制）
   daily_analysis_hour: 3
   # 删除多少天之前的聊天历史记录（0表示永不删除）
-  delete_history_days: 100
+  delete_history_days: 30
   # 数据库存储最大容量软阈值监控（预留预警或缩容机制依据，单位 GB）
   db_cleanup_size_gb: 80
   # Batch 任务轮询间隔（分钟）
@@ -69,10 +83,10 @@ app:
   # 教师端批量导出时的学生并发数
   export_concurrency: 10
   # 导出的Excel文件存放路径
-  export_dir: "./exports"
+  export_dir: ./exports
   # 数据库备份路径
-  backup_dir: "./database_backups"
+  backup_dir: ./database_backups
 
 logging:
   # 日志根目录
-  log_dir: "./logs"
+  log_dir: ./logs

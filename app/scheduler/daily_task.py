@@ -17,6 +17,7 @@ from sqlalchemy import delete, text
 
 from app.core.config import CHINA_TZ, settings
 from app.core.database import AsyncSessionLocal
+from app.core.time_utils import yesterday_biz_iso_date
 from app.models.models import Question
 from app.services import analysis_service, db_service, report_export_service
 
@@ -107,22 +108,22 @@ async def _daily_analysis_job() -> None:
     """执行每日分析、数据清理和导出清理。"""
     from datetime import datetime
 
-    today = datetime.now(CHINA_TZ).date().isoformat()
-    logger.info("[定时任务] 开始执行每日分析，日期=%s", today)
+    target_date = yesterday_biz_iso_date()
+    logger.info("[定时任务] 开始执行每日分析，分析日期=%s", target_date)
 
     async with AsyncSessionLocal() as db:
         try:
             if settings.batch_api_key:
-                result = await analysis_service.submit_daily_analysis_batch(db=db, date_str=today)
+                result = await analysis_service.submit_daily_analysis_batch(db=db, date_str=target_date)
                 if result.get("submitted", 0) > 0:
                     logger.info(
-                        "[定时任务] 已提交批量分析任务，日期=%s，提交请求数=%s",
-                        today,
+                        "[定时任务] 已提交批量分析任务，分析日期=%s，提交请求数=%s",
+                        target_date,
                         result.get("submitted", 0),
                     )
                     resume_batch_poll()
             else:
-                result = await analysis_service.run_daily_analysis(db=db, date_str=today)
+                result = await analysis_service.run_daily_analysis(db=db, date_str=target_date)
 
             if settings.delete_history_days > 0:
                 cutoff_date = datetime.now(CHINA_TZ) - timedelta(days=settings.delete_history_days)
