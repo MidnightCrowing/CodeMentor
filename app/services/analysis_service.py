@@ -19,7 +19,8 @@ services/analysis_service.py
 测试入口：tests/test_analysis_service.py
 """
 
-from datetime import date, timedelta, datetime, timezone
+from datetime import date, datetime, timedelta
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.prompts import ANALYSIS_SYSTEM_PROMPT
+from app.core.time_utils import biz_day_range, ensure_biz_dt, now_biz_dt_for_db, today_biz
 from app.models.models import (
     DailyAnalysis,
     Question,
@@ -99,12 +101,14 @@ async def run_daily_analysis(db: AsyncSession, date_str: str) -> dict:
         {"processed_users": int, "skipped": int} 执行摘要
     """
     # 提取该天的所有编程问题（过滤掉非编程拒答记录）
-    target_date = _parse_date(date_str)
+    _parse_date(date_str)
+    start_dt, end_dt = biz_day_range(date_str)
     stmt = (
         select(Question)
         .where(
             and_(
-                func.date(Question.created_at) == target_date,
+                Question.created_at >= start_dt,
+                Question.created_at < end_dt,
                 Question.is_programming == True,  # noqa: E712
             )
         )
@@ -260,7 +264,7 @@ async def generate_report(db: AsyncSession, user_id: str) -> str:
         ValueError: 该用户无任何分析数据
     """
     # 计算时间窗口（最近 max_report_days 天）
-    end_date = date.today()
+    end_date = today_biz()
     start_date = end_date - timedelta(days=settings.max_report_days - 1)
 
     rows = await get_daily_analyses(
@@ -283,7 +287,8 @@ async def generate_report(db: AsyncSession, user_id: str) -> str:
 
 
 def _is_fresh_summary_report(report: SummaryReport) -> bool:
-    return report.created_at.date() == date.today()
+    created_at = ensure_biz_dt(report.created_at)
+    return created_at is not None and created_at.date() == today_biz()
 
 
 async def generate_summary_report_payload(
@@ -332,7 +337,7 @@ async def get_or_generate_summary_report(
         cached.report_text = report_text
         cached.report_json = report_json
         cached.total_score = total_score
-        cached.updated_at = datetime.now(timezone.utc)
+        cached.updated_at = now_biz_dt_for_db()
         await db.flush()
         return cached
 
@@ -517,12 +522,14 @@ async def _fetch_daily_questions(
     """
     提取指定日期的编程问题，按 user_id 分组。
     """
-    target_date = _parse_date(date_str)
+    _parse_date(date_str)
+    start_dt, end_dt = biz_day_range(date_str)
     stmt = (
         select(Question)
         .where(
             and_(
-                func.date(Question.created_at) == target_date,
+                Question.created_at >= start_dt,
+                Question.created_at < end_dt,
                 Question.is_programming == True,  # noqa: E712
             )
         )
@@ -545,13 +552,15 @@ async def run_daily_analysis_for_user(
     """
     为指定用户立即生成指定日期的每日分析。
     """
-    target_date = _parse_date(date_str)
+    _parse_date(date_str)
+    start_dt, end_dt = biz_day_range(date_str)
     stmt = (
         select(Question)
         .where(
             and_(
                 Question.user_id == user_id,
-                func.date(Question.created_at) == target_date,
+                Question.created_at >= start_dt,
+                Question.created_at < end_dt,
                 Question.is_programming == True,  # noqa: E712
             )
         )
@@ -772,7 +781,7 @@ async def get_recent_student_model_usage(
     """
     from app.core.config import CHINA_TZ
     from datetime import datetime
-    today_local = datetime.now(CHINA_TZ).date()
+    today_local = today_biz()
     cutoff_date = (today_local - timedelta(days=6)).isoformat()
 
     # 1. 找到这 7 天内最活跃的学生列表
@@ -1124,3 +1133,101 @@ async def get_model_latency_trend(
             }
         )
     return data
+
+
+async def run_daily_analysis_concurrent(
+    db: AsyncSession,
+    date_str: str,
+    concurrency: int = 10,
+    max_retries: int = 5,
+    retry_user_ids: list[str] | None = None,
+) -> dict:
+    """
+    并发 Chat 模式批量分析，支持重试。
+
+    Args:
+        db: 数据库会话（用于查询问题）
+        date_str: 分析日期 YYYY-MM-DD
+        concurrency: 并发数
+        max_retries: 每个用户最大重试次数
+        retry_user_ids: 如果提供，只重试这些用户
+
+    Returns:
+        {
+            "mode": "concurrent",
+            "date": str,
+            "total": int,
+            "completed": int,
+            "failed": int,
+            "failed_user_ids": list[str],
+        }
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.services.llm_service import LLMServiceError
+
+    # 获取问题
+    questions_by_user = await _fetch_daily_questions(db, date_str)
+
+    # 如果指定重试用户，过滤
+    if retry_user_ids:
+        questions_by_user = {
+            uid: qs for uid, qs in questions_by_user.items() if uid in retry_user_ids
+        }
+
+    if not questions_by_user:
+        return {
+            "mode": "concurrent",
+            "date": date_str,
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "failed_user_ids": [],
+        }
+
+    total = len(questions_by_user)
+    completed = 0
+    failed = 0
+    failed_user_ids = []
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _process_user_with_retry(user_id: str, questions: list) -> dict:
+        """处理单个用户，支持重试。"""
+        async with semaphore:
+            for attempt in range(max_retries):
+                try:
+                    async with AsyncSessionLocal() as sub_db:
+                        await _analyze_and_upsert(sub_db, user_id, date_str, questions)
+                        await sub_db.commit()
+                    return {"user_id": user_id, "success": True}
+                except LLMServiceError as exc:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    return {"user_id": user_id, "success": False, "error": str(exc)}
+                except Exception as exc:
+                    logger.exception(f"分析用户 {user_id} 时发生未预期错误")
+                    return {"user_id": user_id, "success": False, "error": str(exc)}
+
+    # 并发执行
+    tasks = [
+        _process_user_with_retry(uid, qs) for uid, qs in questions_by_user.items()
+    ]
+    results = await asyncio.gather(*tasks)
+
+    # 汇总结果
+    for result in results:
+        if result["success"]:
+            completed += 1
+        else:
+            failed += 1
+            failed_user_ids.append(result["user_id"])
+
+    return {
+        "mode": "concurrent",
+        "date": date_str,
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "failed_user_ids": failed_user_ids,
+    }

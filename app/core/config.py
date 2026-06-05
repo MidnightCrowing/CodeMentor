@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     analysis_model: str = _yaml["llm"]["analysis_model"]
     llm_timeout: int = _yaml["llm"]["timeout"]
     llm_base_url: str = _yaml["llm"]["base_url"]
+    chat_base_url: str = _yaml["llm"].get("chat_base_url") or _yaml["llm"]["base_url"]
+    classify_base_url: str = _yaml["llm"].get("classify_base_url") or _yaml["llm"]["base_url"]
+    batch_base_url: str = _yaml["llm"].get("batch_base_url") or _yaml["llm"]["base_url"]
     batch_completion_window: str = _yaml["llm"].get("batch_completion_window", "24h")
 
     # 应用配置（来自 yaml）

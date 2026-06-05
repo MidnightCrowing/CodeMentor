@@ -5,10 +5,11 @@
 import logging
 import os
 import subprocess
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import settings, CHINA_TZ
+from app.core.time_utils import days_ago_biz
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +71,13 @@ def cleanup_old_backups(days: int = 10) -> int:
     if not backup_dir.exists():
         return 0
 
-    cutoff_time = datetime.now() - timedelta(days=days)
+    from datetime import datetime
+    cutoff_time = days_ago_biz(days)
     count = 0
 
     for file_path in backup_dir.glob("*.sql"):
         try:
-            mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+            mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=CHINA_TZ)
             if mtime < cutoff_time:
                 file_path.unlink()
                 count += 1

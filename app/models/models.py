@@ -10,11 +10,11 @@ models/models.py
 
 注意：
 - UUID 主键使用 Python 端生成（uuid4），不依赖数据库序列
-- 时间戳字段统一使用 TIMESTAMP WITH TIME ZONE，存 UTC
+- 时间戳字段统一使用 TIMESTAMP WITH TIME ZONE，应用层写入 UTC+8 aware datetime
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -29,11 +29,11 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.core.time_utils import now_biz_dt_for_db
 
 
-def _now_utc() -> datetime:
-    """返回当前 UTC 时间（带时区）。"""
-    return datetime.now(timezone.utc)
+def _now_biz() -> datetime:
+    return now_biz_dt_for_db()
 
 
 # User 表
@@ -49,7 +49,7 @@ class User(Base):
     student_no: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
 
     __table_args__ = (
@@ -111,7 +111,7 @@ class Session(Base):
     user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(200), nullable=True, default="新会话")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
 
 
@@ -142,7 +142,7 @@ class Question(Base):
     tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
 
     __table_args__ = (
@@ -173,7 +173,7 @@ class DailyAnalysis(Base):
     analysis_text: Mapped[str] = mapped_column(Text, nullable=False)
     analysis_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
 
     __table_args__ = (
@@ -200,10 +200,10 @@ class SummaryReport(Base):
     report_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+        DateTime(timezone=True), default=_now_biz, onupdate=_now_biz
     )
 
     __table_args__ = (
@@ -238,10 +238,10 @@ class SummaryReportExportJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+        DateTime(timezone=True), default=_now_biz, onupdate=_now_biz
     )
 
     __table_args__ = (
@@ -270,13 +270,50 @@ class AnalysisBatchJob(Base):
     error_file_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc
+        DateTime(timezone=True), default=_now_biz
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now_utc, onupdate=_now_utc
+        DateTime(timezone=True), default=_now_biz, onupdate=_now_biz
     )
 
     __table_args__ = (
         Index("idx_batch_date", "date"),
         Index("idx_batch_status", "status"),
+    )
+
+
+# 管理员批量分析任务表
+class AdminBatchAnalysisJob(Base):
+    """
+    管理员手动触发的批量分析任务，支持 batch/concurrent 模式。
+    """
+    __tablename__ = "admin_batch_analysis_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    date: Mapped[str] = mapped_column(String(10), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    failed_user_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_biz
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_biz, onupdate=_now_biz
+    )
+
+    __table_args__ = (
+        Index("idx_admin_batch_user", "user_id"),
+        Index("idx_admin_batch_status", "status"),
+        Index("idx_admin_batch_created_at", "created_at"),
     )

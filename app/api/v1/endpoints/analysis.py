@@ -4,16 +4,21 @@ api/v1/endpoints/analysis.py
 /api/v1/analysis/* routes.
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 import asyncio
+import json
 import os
+import uuid
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, check_user_permission, get_current_user_id, require_user
 from app.core.config import settings
+from app.core.time_utils import today_biz, yesterday_biz_iso_date
+from app.models.models import AdminBatchAnalysisJob
 from app.schemas.analysis_schema import (
     DailyAnalysisSummaryOut,
     ModelUsageChartPoint,
@@ -29,6 +34,8 @@ from app.schemas.analysis_schema import (
     ExportSummaryReportRequest,
     ExportSummaryReportJobOut,
     ClassCodeOut,
+    AdminBatchAnalysisRequest,
+    AdminBatchAnalysisJobOut,
 )
 from app.schemas.base import BaseResponse
 from app.services import analysis_service
@@ -54,11 +61,11 @@ async def _get_owned_export_job(
 async def get_daily_analysis(
     target_user_id: str = Query(..., description="Target student user id"),
     start_date: str = Query(
-        default_factory=lambda: date.today().isoformat(),
+        default_factory=lambda: today_biz().isoformat(),
         description="Start date, format YYYY-MM-DD",
     ),
     end_date: str = Query(
-        default_factory=lambda: date.today().isoformat(),
+        default_factory=lambda: today_biz().isoformat(),
         description="End date, format YYYY-MM-DD",
     ),
     db: AsyncSession = Depends(get_db),
@@ -92,7 +99,7 @@ async def generate_report(
     await check_user_permission(current_user_id, db, "teacher")
     await require_user(body.target_user_id, db)
     try:
-        end_date = date.today()
+        end_date = today_biz()
         start_date = end_date - timedelta(days=settings.max_report_days - 1)
         report = await analysis_service.get_or_generate_summary_report(
             db=db,
@@ -428,7 +435,7 @@ async def run_daily_for_user(
     """
     await check_user_permission(current_user_id, db, "admin")
     await require_user(body.target_user_id, db)
-    target_date = body.date or date.today().isoformat()
+    target_date = body.date or today_biz().isoformat()
 
     result = await analysis_service.run_daily_analysis_for_user(
         db=db,
@@ -457,4 +464,213 @@ async def run_daily_for_user(
         "analysis_json": analysis.analysis_json if analysis else None,
         "created_at": analysis.created_at if analysis else None,
     }
+    return BaseResponse.ok(data)
+
+
+@router.post("/analysis/daily/batch")
+async def run_daily_batch_analysis(
+    body: AdminBatchAnalysisRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    Admin: batch analysis with streaming logs (SSE).
+
+    Supports two modes:
+    - batch: submit to OpenAI Batch API
+    - concurrent: run concurrent chat calls with retry
+    """
+    await check_user_permission(current_user_id, db, "admin")
+
+    target_date = body.date or yesterday_biz_iso_date()
+
+    async def _sse(event: str, data: str) -> str:
+        return f"event: {event}\ndata: {data}\n\n"
+
+    async def _stream_logs():
+        try:
+            # 重试模式
+            if body.retry:
+                if not body.job_id:
+                    yield await _sse("error", json.dumps({"message": "重试模式需要提供 job_id"}))
+                    return
+
+                # 查询任务
+                stmt = select(AdminBatchAnalysisJob).where(AdminBatchAnalysisJob.id == uuid.UUID(body.job_id))
+                result = await db.execute(stmt)
+                job = result.scalar_one_or_none()
+
+                if not job:
+                    yield await _sse("error", json.dumps({"message": "任务不存在"}))
+                    return
+
+                if job.status == "running":
+                    yield await _sse("log", json.dumps({"message": "任务正在进行中，请稍后查询状态"}))
+                    yield await _sse("done", json.dumps({"job_id": str(job.id)}))
+                    return
+
+                # 提取失败用户
+                retry_user_ids = job.failed_user_ids or []
+                if not retry_user_ids:
+                    yield await _sse("log", json.dumps({"message": "没有失败的用户需要重试"}))
+                    yield await _sse("done", json.dumps({"job_id": str(job.id)}))
+                    return
+
+                yield await _sse("log", json.dumps({"message": f"开始重试 {len(retry_user_ids)} 个失败的学生"}))
+
+                # 更新任务状态
+                job.status = "running"
+                job.failed_count = 0
+                job.completed_count = 0
+                job.failed_user_ids = []
+                await db.commit()
+
+                # 执行重试
+                result = await analysis_service.run_daily_analysis_concurrent(
+                    db=db,
+                    date_str=target_date,
+                    concurrency=body.concurrency or 10,
+                    max_retries=5,
+                    retry_user_ids=retry_user_ids,
+                )
+
+                # 更新任务
+                job.completed_count = result["completed"]
+                job.failed_count = result["failed"]
+                job.failed_user_ids = result["failed_user_ids"]
+                job.status = "completed" if result["failed"] == 0 else "failed"
+                await db.commit()
+
+                yield await _sse("log", json.dumps({
+                    "message": f"重试完成：成功 {result['completed']}，失败 {result['failed']}"
+                }))
+                yield await _sse("done", json.dumps({
+                    "job_id": str(job.id),
+                    "completed": result["completed"],
+                    "failed": result["failed"],
+                }))
+                return
+
+            # Batch 模式
+            if body.mode == "batch":
+                yield await _sse("log", json.dumps({"message": "正在提交 Batch 任务..."}))
+
+                batch_result = await analysis_service.submit_daily_analysis_batch(
+                    db=db,
+                    date_str=target_date,
+                )
+
+                # 创建任务记录
+                job = AdminBatchAnalysisJob(
+                    id=uuid.uuid4(),
+                    user_id=current_user_id,
+                    date=target_date,
+                    mode="batch",
+                    status="pending",
+                    total_count=batch_result.get("total_users", 0),
+                )
+                db.add(job)
+                await db.commit()
+
+                yield await _sse("log", json.dumps({
+                    "message": f"Batch 任务已提交，batch_id: {batch_result.get('batch_id')}"
+                }))
+                yield await _sse("done", json.dumps({
+                    "job_id": str(job.id),
+                    "batch_id": batch_result.get("batch_id"),
+                }))
+                return
+
+            # 并发 Chat 模式
+            yield await _sse("log", json.dumps({"message": f"开始并发分析，日期: {target_date}"}))
+
+            # 创建任务记录
+            job = AdminBatchAnalysisJob(
+                id=uuid.uuid4(),
+                user_id=current_user_id,
+                date=target_date,
+                mode="concurrent",
+                concurrency=body.concurrency or 10,
+                status="running",
+            )
+            db.add(job)
+            await db.commit()
+
+            yield await _sse("log", json.dumps({"message": f"任务 ID: {job.id}"}))
+
+            # 执行并发分析
+            result = await analysis_service.run_daily_analysis_concurrent(
+                db=db,
+                date_str=target_date,
+                concurrency=body.concurrency or 10,
+                max_retries=5,
+            )
+
+            # 更新任务
+            job.total_count = result["total"]
+            job.completed_count = result["completed"]
+            job.failed_count = result["failed"]
+            job.failed_user_ids = result["failed_user_ids"]
+            job.status = "completed" if result["failed"] == 0 else "failed"
+            await db.commit()
+
+            yield await _sse("log", json.dumps({
+                "message": f"分析完成：总计 {result['total']}，成功 {result['completed']}，失败 {result['failed']}"
+            }))
+
+            if result["failed"] > 0:
+                yield await _sse("log", json.dumps({
+                    "message": f"失败的学生: {', '.join(result['failed_user_ids'][:10])}" +
+                               (f" 等 {result['failed']} 个" if result['failed'] > 10 else "")
+                }))
+
+            yield await _sse("done", json.dumps({
+                "job_id": str(job.id),
+                "total": result["total"],
+                "completed": result["completed"],
+                "failed": result["failed"],
+            }))
+
+        except Exception as exc:
+            import logging
+            logging.exception("批量分析流式接口异常")
+            yield await _sse("error", json.dumps({"message": str(exc)}))
+
+    return StreamingResponse(_stream_logs(), media_type="text/event-stream")
+
+
+@router.get("/analysis/daily/batch/jobs/{job_id}")
+async def get_batch_analysis_job_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    Query batch analysis job status.
+    """
+    await check_user_permission(current_user_id, db, "admin")
+
+    stmt = select(AdminBatchAnalysisJob).where(AdminBatchAnalysisJob.id == uuid.UUID(job_id))
+    result = await db.execute(stmt)
+    job = result.scalar_one_or_none()
+
+    if not job:
+        return BaseResponse.error("任务不存在", code=404)
+
+    progress = (job.completed_count / job.total_count * 100) if job.total_count > 0 else 0.0
+
+    data = AdminBatchAnalysisJobOut(
+        job_id=str(job.id),
+        status=job.status,
+        mode=job.mode,
+        date=job.date,
+        total_count=job.total_count,
+        completed_count=job.completed_count,
+        failed_count=job.failed_count,
+        failed_user_ids=job.failed_user_ids,
+        progress=progress,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
+
     return BaseResponse.ok(data)

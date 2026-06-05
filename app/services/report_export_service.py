@@ -9,16 +9,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import date, datetime, timezone, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.time_utils import now_biz, today_biz, now_biz_dt_for_db, days_ago_biz
 from app.models.models import SummaryReportExportJob, User
 from app.services import analysis_service
 
@@ -28,7 +30,7 @@ EXPORT_DIR = Path(settings.export_dir)
 
 
 def _now_local_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return now_biz().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _derive_class_code(student_no: str | None) -> str | None:
@@ -91,6 +93,7 @@ def _write_excel(
     teacher_name: str | None,
     school_name: str | None,
     include_text: bool,
+    daily_rows: list[dict] | None = None,
 ) -> str:
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
@@ -154,10 +157,81 @@ def _write_excel(
         # Limited to 26 columns based on chr(64+col)
         ws.column_dimensions[chr(64 + col)].width = 18
 
-    filename = f"summary_report_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    # 第二个工作表：每日分析（竖排为学生，横排为日期）
+    _write_daily_analysis_sheet(wb, daily_rows or [])
+
+    filename = f"summary_report_export_{now_biz().strftime('%Y%m%d_%H%M%S')}.xlsx"
     path = EXPORT_DIR / filename
     wb.save(path)
     return str(path)
+
+
+def _write_daily_analysis_sheet(wb: Workbook, daily_rows: list[dict]) -> None:
+    """
+    写入「每日分析」工作表：每个学生一行，每个日期一列，单元格为当日分析文本。
+
+    daily_rows 每项结构：
+        {"idx": int, "name": str, "student_no": str, "daily": {date_str: analysis_text}}
+    """
+    ws = wb.create_sheet(title="每日分析")
+
+    # 汇总所有出现过的日期（升序），作为日期列
+    all_dates = sorted({d for entry in daily_rows for d in (entry.get("daily") or {}).keys()})
+
+    base_columns = ["序号", "学生姓名", "学号/工号"]
+    columns = base_columns + all_dates
+    total_cols = len(columns)
+
+    # 冻结前两行 + 前三列（学生信息列）
+    ws.freeze_panes = "D2"
+
+    # 表头
+    ws.append(columns)
+    for col in range(1, total_cols + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.fill = PatternFill("solid", fgColor="CBDFFE")
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    data_fills = [
+        PatternFill("solid", fgColor="F1F6FD"),
+        PatternFill("solid", fgColor="FFFFFF"),
+    ]
+
+    # 按序号排序，保持与成绩表一致的学生顺序
+    sorted_rows = sorted(daily_rows, key=lambda x: x.get("idx", 0))
+
+    for i, entry in enumerate(sorted_rows, start=1):
+        daily = entry.get("daily") or {}
+        row = [
+            entry.get("idx", i),
+            entry.get("name", ""),
+            entry.get("student_no", ""),
+        ]
+        for d in all_dates:
+            row.append(daily.get(d, ""))
+        ws.append(row)
+
+        data_row_idx = i + 1
+        fill = data_fills[i % 2]
+        ws.row_dimensions[data_row_idx].height = 120
+        for col in range(1, total_cols + 1):
+            cell = ws.cell(row=data_row_idx, column=col)
+            cell.fill = fill
+            # 学生信息列居中，分析内容列左上对齐并自动换行
+            if col <= len(base_columns):
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    # 列宽：信息列较窄，日期分析列较宽
+    ws.column_dimensions[get_column_letter(1)].width = 8   # 序号
+    ws.column_dimensions[get_column_letter(2)].width = 14  # 姓名
+    ws.column_dimensions[get_column_letter(3)].width = 18  # 学号
+    for col in range(len(base_columns) + 1, total_cols + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 45
+
+    ws.row_dimensions[1].height = 24
 
 
 async def run_export_job(job_id: str) -> None:
@@ -170,7 +244,7 @@ async def run_export_job(job_id: str) -> None:
             return
 
         job.status = "running"
-        job.updated_at = datetime.now(timezone.utc)
+        job.updated_at = now_biz_dt_for_db()
         await db.commit()
 
     # Re-fetch for processing
@@ -186,12 +260,13 @@ async def run_export_job(job_id: str) -> None:
                 await db.commit()
                 return
 
-            end_date = date.today()
+            end_date = today_biz()
             start_date = end_date - timedelta(days=settings.max_report_days - 1)
             start_str = start_date.isoformat()
             end_str = end_date.isoformat()
 
             results: list[list] = []
+            daily_results: list[dict] = []
             semaphore = asyncio.Semaphore(settings.export_concurrency)
 
             async def _process_student(user: User, idx: int):
@@ -199,6 +274,21 @@ async def run_export_job(job_id: str) -> None:
                     try:
                         # Use a dedicated session for each student to avoid cross-sharing issues
                         async with AsyncSessionLocal() as sub_db:
+                            # 收集每日分析内容（用于「每日分析」工作表）
+                            daily_analyses = await analysis_service.get_daily_analyses(
+                                db=sub_db,
+                                user_id=user.user_id,
+                                start_date=start_str,
+                                end_date=end_str,
+                            )
+                            if daily_analyses:
+                                daily_results.append({
+                                    "idx": idx,
+                                    "name": user.real_name or "",
+                                    "student_no": user.student_no or user.user_id,
+                                    "daily": {r.date: (r.analysis_text or "") for r in daily_analyses},
+                                })
+
                             report = await analysis_service.get_or_generate_summary_report(
                                 db=sub_db,
                                 user_id=user.user_id,
@@ -235,7 +325,7 @@ async def run_export_job(job_id: str) -> None:
                                     .where(SummaryReportExportJob.id == job_id)
                                     .values(
                                         completed_count=SummaryReportExportJob.completed_count + 1,
-                                        updated_at=datetime.now(timezone.utc)
+                                        updated_at=now_biz_dt_for_db()
                                     )
                                 )
                                 await progress_db.commit()
@@ -249,7 +339,7 @@ async def run_export_job(job_id: str) -> None:
                                     .where(SummaryReportExportJob.id == job_id)
                                     .values(
                                         completed_count=SummaryReportExportJob.completed_count + 1,
-                                        updated_at=datetime.now(timezone.utc)
+                                        updated_at=now_biz_dt_for_db()
                                     )
                                 )
                                 await progress_db.commit()
@@ -261,7 +351,7 @@ async def run_export_job(job_id: str) -> None:
                                     .where(SummaryReportExportJob.id == job_id)
                                     .values(
                                         failed_count=SummaryReportExportJob.failed_count + 1,
-                                        updated_at=datetime.now(timezone.utc)
+                                        updated_at=now_biz_dt_for_db()
                                     )
                                 )
                                 await progress_db.commit()
@@ -273,7 +363,7 @@ async def run_export_job(job_id: str) -> None:
                                 .where(SummaryReportExportJob.id == job_id)
                                 .values(
                                     failed_count=SummaryReportExportJob.failed_count + 1,
-                                    updated_at=datetime.now(timezone.utc)
+                                    updated_at=now_biz_dt_for_db()
                                 )
                             )
                             await progress_db.commit()
@@ -291,10 +381,11 @@ async def run_export_job(job_id: str) -> None:
                 teacher_name=job.teacher_name,
                 school_name=job.school_name,
                 include_text=job.include_text_evaluation,
+                daily_rows=daily_results,
             )
             job.result_path = result_path
             job.status = "completed" if job.failed_count == 0 else "completed_with_errors"
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now_biz_dt_for_db()
             await db.commit()
 
         except Exception as e:
@@ -302,7 +393,7 @@ async def run_export_job(job_id: str) -> None:
             job = await db.get(SummaryReportExportJob, job_id)
             job.status = "failed"
             job.error_message = str(e)
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now_biz_dt_for_db()
             await db.commit()
 
 
@@ -318,7 +409,7 @@ async def reset_stale_jobs() -> int:
             .values(
                 status="failed",
                 error_message="Server restarted during processing",
-                updated_at=datetime.now(timezone.utc)
+                updated_at=now_biz_dt_for_db()
             )
         )
         res = await db.execute(stmt)
@@ -348,10 +439,12 @@ def cleanup_old_exports(days: int = 7) -> int:
     if not EXPORT_DIR.exists():
         return 0
     count = 0
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = days_ago_biz(days)
     for f in EXPORT_DIR.glob("*.xlsx"):
         if f.is_file():
-            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            from datetime import datetime
+            from app.core.config import CHINA_TZ
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=CHINA_TZ)
             if mtime < cutoff:
                 try:
                     f.unlink()
@@ -362,7 +455,7 @@ def cleanup_old_exports(days: int = 7) -> int:
 
 
 async def cleanup_old_export_jobs(db: AsyncSession, days: int = 7) -> int:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = days_ago_biz(days)
     stmt = delete(SummaryReportExportJob).where(
         SummaryReportExportJob.created_at < cutoff
     )

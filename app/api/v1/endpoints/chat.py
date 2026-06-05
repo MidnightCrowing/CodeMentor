@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.limiter import limiter
 from app.core.request_context import get_user_role
 from app.core.security import hash_password
+from app.core.time_utils import days_ago_biz
 from app.models.models import Question, Session, User
 from app.schemas.base import BaseResponse
 from app.schemas.chat_schema import (
@@ -120,9 +121,7 @@ async def delete_sessions_batch(
     """批量删除历史会话。"""
     await check_user_permission(current_user_id, db, "student")
 
-    from datetime import datetime, timedelta, timezone
-
-    cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_time = days_ago_biz(days)
 
     stmt_sess = select(Session.id).where(
         Session.user_id == current_user_id,

@@ -182,3 +182,27 @@ class ExportSummaryReportJobOut(BaseModel):
 class ClassCodeOut(BaseModel):
     """Class code item."""
     class_code: str
+
+
+class AdminBatchAnalysisRequest(BaseModel):
+    """POST /api/v1/analysis/daily/batch 请求体。"""
+    date: str | None = Field(None, description="分析日期 YYYY-MM-DD，默认昨天")
+    mode: Literal["batch", "concurrent"] = Field("batch", description="执行模式")
+    concurrency: int | None = Field(None, ge=1, le=50, description="并发数（concurrent 模式）")
+    retry: bool = Field(False, description="是否重试模式")
+    job_id: str | None = Field(None, description="重试时的任务 ID")
+
+
+class AdminBatchAnalysisJobOut(BaseModel):
+    """GET /api/v1/analysis/daily/batch/jobs/{job_id} 响应体。"""
+    job_id: str
+    status: str
+    mode: str
+    date: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    failed_user_ids: list[str] | None
+    progress: float
+    created_at: datetime
+    updated_at: datetime

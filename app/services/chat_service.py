@@ -5,13 +5,14 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.time_utils import today_biz
 from app.models.models import ModelUsageStat, Question, Session
 from app.services import llm_service
 from app.services.llm_service import LLMServiceError
@@ -348,7 +349,7 @@ async def _upsert_model_usage(
     latency_ms: int,
     is_error: bool,
 ):
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = today_biz().isoformat()
     stmt = insert(ModelUsageStat).values(
         date=date_str,
         user_id=user_id,

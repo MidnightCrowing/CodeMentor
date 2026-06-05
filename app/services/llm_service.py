@@ -34,13 +34,13 @@ class LLMServiceError(Exception):
 
 _client = AsyncOpenAI(
     api_key=settings.chat_api_key,
-    base_url=settings.llm_base_url,
+    base_url=settings.chat_base_url,
     timeout=settings.llm_timeout,
 )
 
 _classify_client = AsyncOpenAI(
     api_key=settings.classify_api_key or settings.chat_api_key,
-    base_url=settings.llm_base_url,
+    base_url=settings.classify_base_url,
     timeout=settings.llm_timeout,
 )
 
