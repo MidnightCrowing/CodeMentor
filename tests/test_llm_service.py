@@ -5,9 +5,9 @@ LLM Service 测试集。
 
 测试内容：
 - classify(): 返回 bool 类型，超时时抛出 LLMServiceError
-- chat_stream(): 能正常流式 yield 内容，最后一块为 ("", usage_dict)
+- chat_stream(): 能正常流式 yield (chunk_type, chunk_data, usage)，最后一块为 done 事件
 - analyze(): 返回必须包含 analysis_text 和 analysis_json，结构固化
-- summarize_report(): 返回非空字符串
+- summarize_report(): 返回结构化报告 JSON
 
 ⚠️ 运行此测试需要：
 1. 在 .env 中填写真实的 OPENAI_API_KEY
@@ -26,7 +26,6 @@ from app.services.llm_service import (
     chat_stream,
     analyze,
     summarize_report,
-    LLMServiceError,
 )
 
 
@@ -48,20 +47,22 @@ async def test_classify_non_programming_question():
 async def test_chat_stream_yields_content():
     """
     流式调用应能 yield 出内容块，
-    且最后一块的 content 为空字符串，usage 不为 None。
+    且最后一块为 done 事件；如果供应商返回 usage，则包含模型和 token 字段。
     """
     chunks: list[tuple] = []
-    async for content, usage in chat_stream("用 Python 写一个 Hello World 程序"):
-        chunks.append((content, usage))
+    async for chunk_type, chunk_data, usage in chat_stream("用 Python 写一个 Hello World 程序"):
+        chunks.append((chunk_type, chunk_data, usage))
 
     assert len(chunks) > 1, "应当至少有一个内容块和一个结束块"
+    assert any(chunk_type == "content" and chunk_data for chunk_type, chunk_data, _ in chunks)
 
     # 检查结束块
-    last_content, last_usage = chunks[-1]
-    assert last_content == ""
-    assert last_usage is not None
-    assert "total_tokens" in last_usage
-    assert "model" in last_usage
+    last_type, last_data, last_usage = chunks[-1]
+    assert last_type == "done"
+    assert last_data == ""
+    if last_usage is not None:
+        assert "total_tokens" in last_usage
+        assert "model" in last_usage
 
 
 @pytest.mark.asyncio
@@ -90,13 +91,30 @@ A: def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)
 
 
 @pytest.mark.asyncio
-async def test_summarize_report_returns_string():
-    """summarize_report() 应返回非空字符串。"""
+async def test_summarize_report_returns_structured_report():
+    """summarize_report() 应返回结构化报告 JSON。"""
     fake_summaries = """
 【2026-03-01】该学生今日提出了 3 个关于循环的问题，主动性较高。
 【2026-03-02】学生主要询问了函数的定义，提问较表面。
 """.strip()
 
     result = await summarize_report(fake_summaries)
-    assert isinstance(result, str)
-    assert len(result) > 50  # 报告应有实质内容
+    assert isinstance(result, dict)
+    assert isinstance(result.get("report_text"), str)
+    assert len(result["report_text"]) > 50  # 报告应有实质内容
+    assert isinstance(result.get("total_score"), int)
+    assert 0 <= result["total_score"] <= 100
+
+    profile = result.get("profile")
+    assert isinstance(profile, dict)
+    assert set(profile) >= {
+        "code_understanding",
+        "new_tech_learning",
+        "communication",
+        "self_learning_and_frequency",
+        "tech_ethics_values",
+        "asks_direct_answers",
+    }
+    assert isinstance(result.get("strengths"), list)
+    assert isinstance(result.get("weaknesses"), list)
+    assert isinstance(result.get("suggestions"), list)

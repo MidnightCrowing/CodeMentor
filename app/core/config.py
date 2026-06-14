@@ -51,10 +51,10 @@ class Settings(BaseSettings):
 
     # 敏感配置（来自 .env）
     # ⚠️ 必须在 .env 中设置 CHAT_API_KEY
-    chat_api_key: str = Field(..., env="CHAT_API_KEY")
-    classify_api_key: str | None = Field(None, env="CLASSIFY_API_KEY")
-    batch_api_key: str | None = Field(None, env="BATCH_API_KEY")
-    database_url: str = Field(..., env="DATABASE_URL")
+    chat_api_key: str = Field(..., validation_alias="CHAT_API_KEY")
+    classify_api_key: str | None = Field(None, validation_alias="CLASSIFY_API_KEY")
+    batch_api_key: str | None = Field(None, validation_alias="BATCH_API_KEY")
+    database_url: str = Field(..., validation_alias="DATABASE_URL")
 
     # LLM 配置（来自 yaml）
     chat_model: str = _yaml["llm"]["chat_model"]
